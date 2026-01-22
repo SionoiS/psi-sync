@@ -1,0 +1,23 @@
+[package]
+name = "psi-examples"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "in_memory"
+path = "src/bin/in_memory.rs"
+
+[[bin]]
+name = "tcp_sync"
+path = "src/bin/tcp_sync.rs"
+
+[dependencies]
+psi-protocol = { path = "../psi-protocol" }
+curve25519-dalek.workspace = true
+sha2.workspace = true
+rand.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"

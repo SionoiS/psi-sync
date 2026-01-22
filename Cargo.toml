@@ -1,0 +1,15 @@
+[workspace]
+members = ["psi-protocol", "psi-examples"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+authors = ["psi-sync contributors"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+curve25519-dalek = { version = "4", features = ["rand_core", "digest"] }
+sha2 = "0.10"
+rand = "0.8"
+thiserror = "1.0"

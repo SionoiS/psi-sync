@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(cargo test:*)",
+      "WebSearch",
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(sudo apt-get:*)",
+      "Bash(sudo apt-get install:*)",
+      "Bash(cargo tree:*)"
+    ]
+  }
+}
