@@ -1,64 +1,94 @@
-//! Message types exchanged between PSI protocol peers.
+//! Message types exchanged between PSI protocol parties.
 
 use crate::error::{PsiError, Result};
 use curve25519_dalek::ristretto::CompressedRistretto;
 use std::collections::HashMap;
 
-/// Message containing blinded points sent to peer.
+/// Message containing blinded points sent to remote party.
 ///
-/// This message is sent from one peer to another after the
-/// `prepare_blinded_points` phase. It contains pairs of hashes
-/// and blinded Ristretto points for all items in the sender's set.
+/// This message is sent from one party to another after the
+/// initialization phase. It contains ONLY blinded Ristretto points
+/// for all items in the sender's set - no hashes are included.
+/// This improves privacy by not revealing any hash information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlindedPointsMessage {
-    /// Pairs of (hash, blinded_point) for each item
-    pub items: Vec<([u8; 32], CompressedRistretto)>,
+    /// Blinded points for each item (no hashes included)
+    pub blinded_points: Vec<CompressedRistretto>,
 }
 
 impl BlindedPointsMessage {
     /// Create a new blinded points message.
     ///
     /// # Arguments
-    /// * `items` - Vector of (hash, blinded_point) pairs
+    /// * `blinded_points` - Vector of blinded points
     ///
     /// # Returns
     /// A new `BlindedPointsMessage` instance
-    pub fn new(items: Vec<([u8; 32], CompressedRistretto)>) -> Self {
-        Self { items }
+    pub fn new(blinded_points: Vec<CompressedRistretto>) -> Self {
+        Self { blinded_points }
     }
 
     /// Create a new blinded points message, validating that it's not empty.
     ///
     /// # Arguments
-    /// * `items` - Vector of (hash, blinded_point) pairs
+    /// * `blinded_points` - Vector of blinded points
     ///
     /// # Returns
     /// A new `BlindedPointsMessage` instance
     ///
     /// # Errors
     /// Returns `PsiError::InvalidBlindedPoints` if the vector is empty.
-    pub fn new_validated(items: Vec<([u8; 32], CompressedRistretto)>) -> Result<Self> {
-        if items.is_empty() {
+    pub fn new_validated(blinded_points: Vec<CompressedRistretto>) -> Result<Self> {
+        if blinded_points.is_empty() {
             return Err(PsiError::InvalidBlindedPoints(
                 "Blinded points vector cannot be empty".to_string(),
             ));
         }
-        Ok(Self { items })
+        Ok(Self { blinded_points })
     }
 
     /// Returns the number of items in this message.
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.blinded_points.len()
     }
 
     /// Returns true if this message contains no items.
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.blinded_points.is_empty()
+    }
+}
+
+/// Message containing double-blinded points sent to remote party.
+///
+/// This message is sent after receiving the remote's single-blinded points.
+/// It contains the double-blinded Ristretto points for all items that were
+/// received from the remote party.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoubleBlindedPointsMessage {
+    /// Double-blinded points computed from remote's single-blinded points
+    pub double_blinded_points: Vec<CompressedRistretto>,
+}
+
+impl DoubleBlindedPointsMessage {
+    /// Create a new double-blinded points message.
+    ///
+    /// # Arguments
+    /// * `double_blinded_points` - Vector of double-blinded points
+    ///
+    /// # Returns
+    /// A new `DoubleBlindedPointsMessage` instance
+    pub fn new(double_blinded_points: Vec<CompressedRistretto>) -> Self {
+        Self { double_blinded_points }
     }
 
-    /// Get just the blinded points (without hashes).
-    pub fn blinded_points(&self) -> Vec<CompressedRistretto> {
-        self.items.iter().map(|(_, point)| *point).collect()
+    /// Returns the number of items in this message.
+    pub fn len(&self) -> usize {
+        self.double_blinded_points.len()
+    }
+
+    /// Returns true if this message contains no items.
+    pub fn is_empty(&self) -> bool {
+        self.double_blinded_points.is_empty()
     }
 }
 
@@ -107,9 +137,9 @@ mod tests {
 
     #[test]
     fn test_blinded_points_message_new() {
-        let items = vec![([1u8; 32], CompressedRistretto([0u8; 32]))];
-        let msg = BlindedPointsMessage::new(items.clone());
-        assert_eq!(msg.items, items);
+        let blinded_points = vec![CompressedRistretto([0u8; 32])];
+        let msg = BlindedPointsMessage::new(blinded_points.clone());
+        assert_eq!(msg.blinded_points, blinded_points);
         assert_eq!(msg.len(), 1);
         assert!(!msg.is_empty());
     }
@@ -123,10 +153,10 @@ mod tests {
 
     #[test]
     fn test_blinded_points_message_validated() {
-        let items = vec![([1u8; 32], CompressedRistretto([0u8; 32]))];
-        let msg = BlindedPointsMessage::new_validated(items.clone());
+        let blinded_points = vec![CompressedRistretto([0u8; 32])];
+        let msg = BlindedPointsMessage::new_validated(blinded_points.clone());
         assert!(msg.is_ok());
-        assert_eq!(msg.unwrap().items, items);
+        assert_eq!(msg.unwrap().blinded_points, blinded_points);
     }
 
     #[test]
@@ -157,5 +187,21 @@ mod tests {
         let result = PsiResult::new(vec![], HashMap::new());
         assert_eq!(result.len(), 0);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_double_blinded_points_message_new() {
+        let double_blinded_points = vec![CompressedRistretto([0u8; 32])];
+        let msg = DoubleBlindedPointsMessage::new(double_blinded_points.clone());
+        assert_eq!(msg.double_blinded_points, double_blinded_points);
+        assert_eq!(msg.len(), 1);
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn test_double_blinded_points_message_empty() {
+        let msg = DoubleBlindedPointsMessage::new(vec![]);
+        assert_eq!(msg.len(), 0);
+        assert!(msg.is_empty());
     }
 }

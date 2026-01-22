@@ -9,10 +9,6 @@ license.workspace = true
 name = "in_memory"
 path = "src/bin/in_memory.rs"
 
-[[bin]]
-name = "tcp_sync"
-path = "src/bin/tcp_sync.rs"
-
 [dependencies]
 psi-protocol = { path = "../psi-protocol" }
 curve25519-dalek.workspace = true

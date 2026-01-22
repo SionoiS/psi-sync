@@ -8,7 +8,7 @@ pub enum PsiError {
     /// Input data was empty.
     EmptyInput,
 
-    /// Blinded points received from peer were invalid.
+    /// Blinded points received from remote were invalid.
     InvalidBlindedPoints(String),
 
     /// A cryptographic operation failed.

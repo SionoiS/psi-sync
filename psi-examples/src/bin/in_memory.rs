@@ -8,15 +8,11 @@
 //! cargo run --bin in_memory
 //! ```
 
-use psi_protocol::{PsiState, PsiResult};
+use psi_protocol::{PsiProtocol, PsiResult};
 use rand::RngCore;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== PSI Protocol In-Memory Example ===\n");
-
-    // Initialize protocol states for Alice and Bob
-    let mut alice = PsiState::new();
-    let mut bob = PsiState::new();
 
     // Define Alice's private set
     let alice_items: Vec<Vec<u8>> = vec![
@@ -44,14 +40,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  {}: {}", i + 1, String::from_utf8_lossy(item));
     }
 
-    // === Phase 1: Prepare blinded points ===
-    println!("\n--- Phase 1: Prepare Blinded Points ---");
+    // === Phase 1: Initialize protocol and prepare blinded points ===
+    println!("\n--- Phase 1: Initialize Protocol ---");
 
-    let alice_message = alice.prepare_blinded_points(&alice_items)?;
-    println!("Alice prepared {} blinded points", alice_message.len());
+    let alice = PsiProtocol::new(&alice_items)?;
+    println!("Alice initialized with {} items", alice_items.len());
 
-    let bob_message = bob.prepare_blinded_points(&bob_items)?;
-    println!("Bob prepared {} blinded points", bob_message.len());
+    let bob = PsiProtocol::new(&bob_items)?;
+    println!("Bob initialized with {} items", bob_items.len());
 
     // === Phase 2: Exchange messages ===
     // In a real scenario, these would be sent over the network (with TLS!)
@@ -59,11 +55,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Phase 2: Exchange Messages ---");
     println!("Exchanging messages (in-memory simulation)...");
 
-    // === Phase 3: Compute intersection ===
-    println!("\n--- Phase 3: Compute Intersection ---");
+    let alice_message = alice.message();
+    let bob_message = bob.message();
 
-    let alice_result: PsiResult = alice.compute_intersection(bob_message)?;
-    let bob_result: PsiResult = bob.compute_intersection(alice_message)?;
+    // === Phase 3: Compute double-blinded points ===
+    println!("\n--- Phase 3: Compute Double-Blinded Points ---");
+
+    let (alice_intermediate, alice_double_message) = alice.compute(bob_message)?;
+    let (bob_intermediate, bob_double_message) = bob.compute(alice_message)?;
+
+    // === Phase 4: Exchange double-blinded messages ===
+    println!("\n--- Phase 4: Exchange Double-Blinded Messages ---");
+    println!("Exchanging double-blinded messages (in-memory simulation)...");
+
+    // === Phase 5: Finalize and compute intersection ===
+    println!("\n--- Phase 5: Finalize and Compute Intersection ---");
+
+    let (_alice_final, alice_result): (_, PsiResult) = alice_intermediate.finalize(bob_double_message)?;
+    let (_bob_final, bob_result): (_, PsiResult) = bob_intermediate.finalize(alice_double_message)?;
 
     // === Results ===
     println!("\n=== Results ===");
@@ -73,12 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Bob found {} items in intersection", bob_result.len());
 
-    // Verify both got the same result
-    assert_eq!(
-        alice_result.intersection_hashes,
-        bob_result.intersection_hashes,
-        "Intersections do not match!"
-    );
+    // Verify both got the same result (convert to sets since order may differ)
+    let alice_set: std::collections::HashSet<_> = alice_result.intersection_hashes.iter().collect();
+    let bob_set: std::collections::HashSet<_> = bob_result.intersection_hashes.iter().collect();
+    assert_eq!(alice_set, bob_set, "Intersections do not match!");
 
     println!("\nIntersection items:");
     for (i, hash) in alice_result.intersection_hashes.iter().enumerate() {
@@ -140,22 +147,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Alice: {} items, Bob: {} items", alice_large.len(), bob_large.len());
 
-    let mut alice_state = PsiState::new();
-    let mut bob_state = PsiState::new();
+    let alice_proto = PsiProtocol::new(&alice_large)?;
+    let bob_proto = PsiProtocol::new(&bob_large)?;
 
-    let alice_msg = alice_state.prepare_blinded_points(&alice_large)?;
-    let bob_msg = bob_state.prepare_blinded_points(&bob_large)?;
+    let alice_msg = alice_proto.message();
+    let bob_msg = bob_proto.message();
 
-    let alice_res = alice_state.compute_intersection(bob_msg)?;
-    let bob_res = bob_state.compute_intersection(alice_msg)?;
+    let (alice_int, alice_double) = alice_proto.compute(bob_msg)?;
+    let (bob_int, bob_double) = bob_proto.compute(alice_msg)?;
+
+    let (_alice_fin, alice_res) = alice_int.finalize(bob_double)?;
+    let (_bob_fin, bob_res) = bob_int.finalize(alice_double)?;
 
     println!(
         "\nIntersection size: {} (expected: 10)",
         alice_res.len()
     );
+    // Compare as sets since order may differ
+    let alice_set: std::collections::HashSet<_> = alice_res.intersection_hashes.iter().collect();
+    let bob_set: std::collections::HashSet<_> = bob_res.intersection_hashes.iter().collect();
     println!(
         "✓ Verification: {}",
-        if alice_res.intersection_hashes == bob_res.intersection_hashes {
+        if alice_set == bob_set {
             "PASSED"
         } else {
             "FAILED"
