@@ -1,34 +1,7 @@
-//! LIP-182 range / payload types.
+//! Range and message types.
 
 use crate::bounds::RangeBounds;
-use crate::error::{ReconcileError, Result};
 use crate::id::SyncId;
-
-/// How a range is represented on the wire (LIP-182 `RangeType`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum RangeType {
-    /// Already processed; `content` is empty.
-    Skip = 0,
-    /// `content` is a 32-byte XOR fingerprint.
-    Fingerprint = 1,
-    /// `content` is an [`ItemSet`].
-    ItemSet = 2,
-}
-
-impl RangeType {
-    /// Decode a single type byte.
-    pub fn from_u8(v: u8) -> Result<Self> {
-        match v {
-            0 => Ok(Self::Skip),
-            1 => Ok(Self::Fingerprint),
-            2 => Ok(Self::ItemSet),
-            _ => Err(ReconcileError::CodecError(format!(
-                "invalid range type {v}"
-            ))),
-        }
-    }
-}
 
 /// Full listing of [`SyncId`]s in a range, plus the two-phase handshake flag.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,147 +12,81 @@ pub struct ItemSet {
     pub reconciled: bool,
 }
 
-/// Payload attached to a [`Range`], matching `kind`.
+/// One interval in a reconciliation message.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RangeContent {
-    /// [`RangeType::Skip`].
-    None,
-    /// [`RangeType::Fingerprint`].
-    Fingerprint([u8; 32]),
-    /// [`RangeType::ItemSet`].
-    Items(ItemSet),
-}
-
-/// One interval in a reconciliation payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Range {
-    /// Inclusive–exclusive bounds.
-    pub bounds: RangeBounds,
-    /// Discriminant.
-    pub kind: RangeType,
-    /// Content; must match `kind`.
-    pub content: RangeContent,
+pub enum Range {
+    /// Already processed; no payload.
+    Skip { bounds: RangeBounds },
+    /// XOR fingerprint of hashes in `bounds`.
+    Fingerprint {
+        bounds: RangeBounds,
+        fingerprint: [u8; 32],
+    },
+    /// Explicit item list for a small range.
+    Items { bounds: RangeBounds, set: ItemSet },
 }
 
 impl Range {
-    /// Skip range (no content).
-    pub fn skip(bounds: RangeBounds) -> Self {
-        Self {
+    pub(crate) fn skip(bounds: RangeBounds) -> Self {
+        Self::Skip { bounds }
+    }
+
+    pub(crate) fn fingerprint(bounds: RangeBounds, fingerprint: [u8; 32]) -> Self {
+        Self::Fingerprint {
             bounds,
-            kind: RangeType::Skip,
-            content: RangeContent::None,
+            fingerprint,
         }
     }
 
-    /// Fingerprint range.
-    pub fn fingerprint(bounds: RangeBounds, fp: [u8; 32]) -> Self {
-        Self {
-            bounds,
-            kind: RangeType::Fingerprint,
-            content: RangeContent::Fingerprint(fp),
+    pub(crate) fn item_set(bounds: RangeBounds, set: ItemSet) -> Self {
+        Self::Items { bounds, set }
+    }
+
+    pub(crate) fn bounds(&self) -> RangeBounds {
+        match *self {
+            Self::Skip { bounds }
+            | Self::Fingerprint { bounds, .. }
+            | Self::Items { bounds, .. } => bounds,
         }
     }
 
-    /// Item-set range.
-    pub fn item_set(bounds: RangeBounds, set: ItemSet) -> Self {
-        Self {
-            bounds,
-            kind: RangeType::ItemSet,
-            content: RangeContent::Items(set),
-        }
-    }
-
-    /// Reject a `kind` / `content` mismatch or `!(a < b)`.
-    pub fn validate(&self) -> Result<()> {
-        if self.bounds.a >= self.bounds.b {
-            return Err(ReconcileError::InvalidBounds);
-        }
-        match (&self.kind, &self.content) {
-            (RangeType::Skip, RangeContent::None)
-            | (RangeType::Fingerprint, RangeContent::Fingerprint(_))
-            | (RangeType::ItemSet, RangeContent::Items(_)) => Ok(()),
-            _ => Err(ReconcileError::PayloadMismatch),
-        }
+    pub(crate) fn is_skip(&self) -> bool {
+        matches!(self, Self::Skip { .. })
     }
 }
 
-/// Cluster / shard filter carried on every payload (LIP-182).
-///
-/// An empty `shards` list means “all shards”.
+/// One reconciliation message.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct SyncScope {
-    /// Cluster identifier.
-    pub cluster: u64,
-    /// Supported shards; empty = all.
-    pub shards: Vec<u64>,
-}
-
-impl SyncScope {
-    /// Unrestricted scope (`cluster = 0`, all shards).
-    pub fn any() -> Self {
-        Self::default()
-    }
-
-    /// True if the two scopes may sync.
-    ///
-    /// Cluster must match. If both shard lists are non-empty they must
-    /// intersect. An empty list is treated as “all shards”.
-    pub fn compatible(&self, other: &Self) -> bool {
-        if self.cluster != other.cluster {
-            return false;
-        }
-        if self.shards.is_empty() || other.shards.is_empty() {
-            return true;
-        }
-        self.shards.iter().any(|s| other.shards.contains(s))
-    }
-}
-
-/// One reconciliation message (LIP-182 `RangesData`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RangesData {
-    /// Sender cluster / shards.
-    pub scope: SyncScope,
-    /// Ranges in partition order.
+pub struct ReconcileMessage {
+    /// Ranges in partition order. Empty means the session is closing.
     pub ranges: Vec<Range>,
 }
 
-impl RangesData {
-    /// Payload with no ranges (session terminator).
-    pub fn empty(scope: SyncScope) -> Self {
-        Self {
-            scope,
-            ranges: Vec::new(),
-        }
+impl ReconcileMessage {
+    /// Empty closer.
+    pub fn empty() -> Self {
+        Self { ranges: Vec::new() }
     }
 
     /// True if there are no ranges left to process.
-    pub fn is_terminal(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.ranges.is_empty()
-    }
-
-    /// Validate every range.
-    pub fn validate(&self) -> Result<()> {
-        for r in &self.ranges {
-            r.validate()?;
-        }
-        Ok(())
     }
 }
 
 /// Merge adjacent Skip ranges into one spanning Skip.
-pub fn merge_skips(ranges: Vec<Range>) -> Vec<Range> {
+pub(crate) fn merge_skips(ranges: Vec<Range>) -> Vec<Range> {
     let mut out: Vec<Range> = Vec::with_capacity(ranges.len());
     for r in ranges {
-        if r.kind == RangeType::Skip {
-            if let Some(last) = out.last_mut() {
-                if last.kind == RangeType::Skip {
-                    last.bounds.b = r.bounds.b;
-                    continue;
-                }
+        if let Range::Skip { bounds } = r {
+            if let Some(Range::Skip { bounds: last }) = out.last_mut() {
+                last.b = bounds.b;
+                continue;
             }
+            out.push(Range::Skip { bounds });
+        } else {
+            out.push(r);
         }
-        out.push(r);
     }
     out
 }
@@ -200,19 +107,9 @@ mod tests {
             Range::fingerprint(c, [1u8; 32]),
         ]);
         assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].kind, RangeType::Skip);
-        assert_eq!(merged[0].bounds.a, SyncId::min_at(0));
-        assert_eq!(merged[0].bounds.b, SyncId::min_at(20));
-        assert_eq!(merged[1].kind, RangeType::Fingerprint);
-    }
-
-    #[test]
-    fn validate_mismatch() {
-        let r = Range {
-            bounds: RangeBounds::window(0, 1).unwrap(),
-            kind: RangeType::Skip,
-            content: RangeContent::Fingerprint([0; 32]),
-        };
-        assert_eq!(r.validate(), Err(ReconcileError::PayloadMismatch));
+        assert!(merged[0].is_skip());
+        assert_eq!(merged[0].bounds().a, SyncId::min_at(0));
+        assert_eq!(merged[0].bounds().b, SyncId::min_at(20));
+        assert!(matches!(merged[1], Range::Fingerprint { .. }));
     }
 }

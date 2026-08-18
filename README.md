@@ -62,27 +62,25 @@ Honest-but-curious peers. The channel **must** be authenticated, confidential, a
 
 ---
 
-## `reconciliation` (LIP-182)
+## `reconciliation` (LIP-182 algorithm)
 
-Range-based set reconciliation. Items are [`SyncId`](https://lip.logos.co/messaging/core/raw/sync.html) `{ timestamp, hash }`, ordered by time then hash. Peers exchange `RangesData` until they agree on `to_send` / `to_recv`.
+Range-based set reconciliation. Items are `SyncId { timestamp, hash }`, ordered by time then hash. The session is type-state (`Reconcile<Running>`), same idea as `PsiProtocol<S>`: `step` consumes `self`.
 
-This crate implements **reconciliation only**, not the LIP transfer protocol and not Waku message hashing (you supply the 32-byte hash).
+This crate implements **reconciliation only**, not a transfer protocol and not Waku message hashing (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself.
 
 ### Flow
 
-1. `ReconcileSession::initiate(store, bounds, scope)` sends one XOR **fingerprint** over the window.
+1. `Reconcile::initiate(&store, bounds)` sends one XOR **fingerprint** over the window.
 2. Matching fingerprints become **Skip**. Small differing ranges become an **ItemSet**. Large ones are split (default 8-way time partition; hash-space fallback when timestamps collide).
-3. Item sets are merge-walked. The first set has `reconciled = false`; the reply has `true` so both sides learn the difference without a transfer protocol.
-4. An empty range list ends the session.
+3. Item sets are merge-walked. The first set has `reconciled = false`; the reply has `true`.
+4. The side that produces an empty message returns `ReconcileStep::Done { farewell: Some(empty) }`. The peer `step`s that closer and finishes.
 
-`codec::encode` / `decode` implement LIP LEB128 + range deltas. The first range’s lower **timestamp** is written explicitly (Nwaku). The LIP wording that the first lower bound is `SyncID(0,0)` would drop a sliding window start; this crate does not do that. There is no libp2p length-prefix.
+`codec` is optional and not used by the session. Cluster/shard bytes are written as zero and ignored on decode.
 
 ### Usage
 
 ```rust
-use reconciliation::{
-    RangeBounds, ReconcileRound, ReconcileSession, ReconcileStore, SyncId, SyncScope,
-};
+use reconciliation::{RangeBounds, Reconcile, ReconcileStep, ReconcileStore, SyncId};
 
 let mut alice = ReconcileStore::new(Default::default())?;
 let mut bob = ReconcileStore::new(Default::default())?;
@@ -90,34 +88,20 @@ alice.insert(SyncId::new(1, [1u8; 32]))?;
 bob.insert(SyncId::new(1, [1u8; 32]))?;
 bob.insert(SyncId::new(2, [2u8; 32]))?;
 
-let (mut a, first) =
-    ReconcileSession::initiate(&alice, RangeBounds::window(0, 10)?, SyncScope::any())?;
-let mut b = ReconcileSession::respond(SyncScope::any());
-let mut incoming = first;
-let result = loop {
-    match b.step(&bob, incoming)? {
-        ReconcileRound::Continue(msg) => {
-            if msg.is_terminal() {
-                break match a.step(&alice, msg)? {
-                    ReconcileRound::Done(r) => r,
-                    ReconcileRound::Continue(_) => a.into_result(),
-                };
-            }
-            match a.step(&alice, msg)? {
-                ReconcileRound::Continue(next) => incoming = next,
-                ReconcileRound::Done(r) => break r,
-            }
-        }
-        ReconcileRound::Done(r) => break r,
+let (a, first) = Reconcile::initiate(&alice, RangeBounds::window(0, 10)?)?;
+let b = Reconcile::respond(&bob);
+match b.step(first)? {
+    ReconcileStep::Done { result, .. } => assert!(result.to_send.len() + result.to_recv.len() > 0),
+    ReconcileStep::Next { message, .. } => {
+        let _ = a.step(message)?;
     }
-};
-assert_eq!(result.to_recv.len(), 1);
+}
 # Ok::<(), reconciliation::ReconcileError>(())
 ```
 
 ### Reconciliation threat model
 
-LIP-182 treats peers as **fully trusted**. Fingerprints leak the XOR of hashes in a range. Item sets leak every `SyncId` in a differing range. A peer can Skip or invent IDs. Prefer an authenticated channel. Cluster/shard mismatch yields an empty payload.
+Peers are trusted to follow the protocol. Fingerprints leak the XOR of hashes in a range. Item sets leak every `SyncId` in a differing range. A peer can Skip or invent IDs. Prefer an authenticated channel.
 
 ---
 

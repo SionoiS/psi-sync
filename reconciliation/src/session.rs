@@ -1,12 +1,12 @@
-//! Multi-round reconciliation session.
+//! Type-state reconciliation session.
 
 use crate::bounds::RangeBounds;
 use crate::error::{ReconcileError, Result};
 use crate::process::process_payload;
-use crate::range::{Range, RangesData, SyncScope};
+use crate::range::{Range, ReconcileMessage};
+use crate::state::{ReconcileState, Running};
 use crate::store::ReconcileStore;
 use crate::SyncId;
-use std::collections::BTreeSet;
 
 /// Symmetric difference accumulated over a session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -17,97 +17,100 @@ pub struct ReconcileResult {
     pub to_recv: Vec<SyncId>,
 }
 
-/// Outcome of one [`ReconcileSession::step`].
-///
-/// If `Continue` carries a [terminal](RangesData::is_terminal) payload, send
-/// it and stop — the peer will `Done` on receipt. Call [`ReconcileSession::into_result`]
-/// for the local diffs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReconcileRound {
-    /// Send this payload and wait for the next one (unless it is terminal).
-    Continue(RangesData),
-    /// The peer sent a terminal payload; do not send further.
-    Done(ReconcileResult),
+/// Outcome of [`Reconcile::step`].
+#[derive(Debug)]
+pub enum ReconcileStep<'store> {
+    /// Send `message` and continue with `next`.
+    Next {
+        next: Reconcile<'store, Running>,
+        message: ReconcileMessage,
+    },
+    /// Session over. Send `farewell` if this side produced the empty closer.
+    Done {
+        result: ReconcileResult,
+        farewell: Option<ReconcileMessage>,
+    },
 }
 
 /// One side of a reconciliation exchange.
-#[derive(Clone, Debug)]
-pub struct ReconcileSession {
-    scope: SyncScope,
-    to_send: BTreeSet<SyncId>,
-    to_recv: BTreeSet<SyncId>,
-    rounds: usize,
-    max_rounds: usize,
+///
+/// Construct with [`Reconcile::initiate`] or [`Reconcile::respond`]. Only
+/// [`Reconcile<Running>`] has [`step`](Reconcile::step).
+pub struct Reconcile<'store, S: ReconcileState> {
+    store: &'store ReconcileStore,
+    state: S,
 }
 
-impl ReconcileSession {
+impl<S: ReconcileState> std::fmt::Debug for Reconcile<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reconcile").finish_non_exhaustive()
+    }
+}
+
+impl<'store> Reconcile<'store, Running> {
     /// Start as initiator: one Fingerprint over `bounds`.
     pub fn initiate(
-        store: &ReconcileStore,
+        store: &'store ReconcileStore,
         bounds: RangeBounds,
-        scope: SyncScope,
-    ) -> Result<(Self, RangesData)> {
+    ) -> Result<(Self, ReconcileMessage)> {
         if bounds.a >= bounds.b {
             return Err(ReconcileError::InvalidBounds);
         }
-        let session = Self::new(scope.clone(), store.config().max_rounds);
-        let payload = RangesData {
-            scope,
+        let session = Self {
+            store,
+            state: Running::new(),
+        };
+        let message = ReconcileMessage {
             ranges: vec![Range::fingerprint(bounds, store.fingerprint(bounds))],
         };
-        Ok((session, payload))
+        Ok((session, message))
     }
 
-    /// Start as responder. The first `step` consumes the initiator payload.
-    pub fn respond(scope: SyncScope) -> Self {
-        Self::new(scope, crate::config::DEFAULT_MAX_ROUNDS)
-    }
-
-    /// Responder with an explicit round cap (matches the store’s config).
-    pub fn respond_with_config(scope: SyncScope, store: &ReconcileStore) -> Self {
-        Self::new(scope, store.config().max_rounds)
-    }
-
-    fn new(scope: SyncScope, max_rounds: usize) -> Self {
+    /// Start as responder. The first [`step`](Self::step) consumes the initiator message.
+    pub fn respond(store: &'store ReconcileStore) -> Self {
         Self {
-            scope,
-            to_send: BTreeSet::new(),
-            to_recv: BTreeSet::new(),
-            rounds: 0,
-            max_rounds,
+            store,
+            state: Running::new(),
         }
     }
 
-    /// Process one incoming payload.
-    pub fn step(&mut self, store: &ReconcileStore, incoming: RangesData) -> Result<ReconcileRound> {
-        incoming.validate()?;
-
-        if incoming.is_terminal() {
-            return Ok(ReconcileRound::Done(self.snapshot()));
-        }
-
-        self.rounds += 1;
-        if self.rounds > self.max_rounds {
-            return Err(ReconcileError::TooManyRounds {
-                max: self.max_rounds,
+    /// Process one incoming message. Consumes `self`.
+    pub fn step(mut self, incoming: ReconcileMessage) -> Result<ReconcileStep<'store>> {
+        if incoming.is_empty() {
+            return Ok(ReconcileStep::Done {
+                result: self.into_result(),
+                farewell: None,
             });
         }
 
-        let out = process_payload(store, &self.scope, &incoming);
-        self.to_send.extend(out.to_send);
-        self.to_recv.extend(out.to_recv);
-        Ok(ReconcileRound::Continue(out.reply))
+        self.state.rounds += 1;
+        if self.state.rounds > self.store.config().max_rounds {
+            return Err(ReconcileError::TooManyRounds {
+                max: self.store.config().max_rounds,
+            });
+        }
+
+        let out = process_payload(self.store, &incoming);
+        self.state.to_send.extend(out.to_send);
+        self.state.to_recv.extend(out.to_recv);
+
+        if out.reply.is_empty() {
+            return Ok(ReconcileStep::Done {
+                result: self.into_result(),
+                farewell: Some(out.reply),
+            });
+        }
+
+        Ok(ReconcileStep::Next {
+            next: self,
+            message: out.reply,
+        })
     }
 
-    /// Local diffs so far. Use after a terminal [`ReconcileRound::Continue`].
-    pub fn into_result(self) -> ReconcileResult {
-        self.snapshot()
-    }
-
-    fn snapshot(&self) -> ReconcileResult {
+    fn into_result(self) -> ReconcileResult {
         ReconcileResult {
-            to_send: self.to_send.iter().copied().collect(),
-            to_recv: self.to_recv.iter().copied().collect(),
+            to_send: self.state.to_send.into_iter().collect(),
+            to_recv: self.state.to_recv.into_iter().collect(),
         }
     }
 }
@@ -118,42 +121,59 @@ pub(crate) fn run_pair(
     alice_store: &ReconcileStore,
     bob_store: &ReconcileStore,
     bounds: RangeBounds,
-    scope: SyncScope,
 ) -> Result<(ReconcileResult, ReconcileResult)> {
-    let (mut alice, first) = ReconcileSession::initiate(alice_store, bounds, scope.clone())?;
-    let mut bob = ReconcileSession::respond_with_config(scope, bob_store);
+    let (alice, first) = Reconcile::initiate(alice_store, bounds)?;
+    let bob = Reconcile::respond(bob_store);
+    drive(alice, bob, first)
+}
 
-    let mut incoming_to_bob = first;
+#[cfg(test)]
+fn drive<'a>(
+    mut alice: Reconcile<'a, Running>,
+    mut bob: Reconcile<'a, Running>,
+    mut incoming: ReconcileMessage,
+) -> Result<(ReconcileResult, ReconcileResult)> {
     loop {
-        match bob.step(bob_store, incoming_to_bob)? {
-            ReconcileRound::Continue(msg) => {
-                if msg.is_terminal() {
-                    match alice.step(alice_store, msg)? {
-                        ReconcileRound::Done(a) => return Ok((a, bob.into_result())),
-                        ReconcileRound::Continue(_) => {
-                            return Ok((alice.into_result(), bob.into_result()));
-                        }
+        match bob.step(incoming)? {
+            ReconcileStep::Next { next, message } => {
+                bob = next;
+                match alice.step(message)? {
+                    ReconcileStep::Next { next, message } => {
+                        alice = next;
+                        incoming = message;
                     }
-                }
-                match alice.step(alice_store, msg)? {
-                    ReconcileRound::Continue(next) => {
-                        if next.is_terminal() {
-                            match bob.step(bob_store, next)? {
-                                ReconcileRound::Done(b) => {
-                                    return Ok((alice.into_result(), b));
-                                }
-                                ReconcileRound::Continue(_) => {
-                                    return Ok((alice.into_result(), bob.into_result()));
-                                }
-                            }
-                        }
-                        incoming_to_bob = next;
+                    ReconcileStep::Done { result, farewell } => {
+                        let br = finish_peer(bob, farewell)?;
+                        return Ok((result, br));
                     }
-                    ReconcileRound::Done(a) => return Ok((a, bob.into_result())),
                 }
             }
-            ReconcileRound::Done(b) => return Ok((alice.into_result(), b)),
+            ReconcileStep::Done { result, farewell } => {
+                let ar = finish_peer(alice, farewell)?;
+                return Ok((ar, result));
+            }
         }
+    }
+}
+
+#[cfg(test)]
+fn finish_peer(
+    session: Reconcile<'_, Running>,
+    farewell: Option<ReconcileMessage>,
+) -> Result<ReconcileResult> {
+    match farewell {
+        None => match session.step(ReconcileMessage::empty())? {
+            ReconcileStep::Done { result, .. } => Ok(result),
+            ReconcileStep::Next { .. } => {
+                panic!("empty incoming must finish the session")
+            }
+        },
+        Some(msg) => match session.step(msg)? {
+            ReconcileStep::Done { result, .. } => Ok(result),
+            ReconcileStep::Next { .. } => {
+                panic!("closer must finish the session")
+            }
+        },
     }
 }
 
@@ -186,7 +206,7 @@ mod tests {
         let ids = [(1, 1), (2, 2), (3, 3)];
         let a = store(&ids);
         let b = store(&ids);
-        let (ar, br) = run_pair(&a, &b, window(), SyncScope::any()).unwrap();
+        let (ar, br) = run_pair(&a, &b, window()).unwrap();
         assert!(ar.to_send.is_empty() && ar.to_recv.is_empty());
         assert!(br.to_send.is_empty() && br.to_recv.is_empty());
     }
@@ -195,7 +215,7 @@ mod tests {
     fn alice_only_extras() {
         let alice = store(&[(1, 1), (2, 2), (3, 3)]);
         let bob = store(&[(1, 1)]);
-        let (ar, br) = run_pair(&alice, &bob, window(), SyncScope::any()).unwrap();
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
         assert_eq!(ar.to_send, vec![sid(2, 2), sid(3, 3)]);
         assert!(ar.to_recv.is_empty());
         assert_eq!(br.to_recv, ar.to_send);
@@ -206,7 +226,7 @@ mod tests {
     fn bob_only_extras() {
         let alice = store(&[(1, 1)]);
         let bob = store(&[(1, 1), (4, 4)]);
-        let (ar, br) = run_pair(&alice, &bob, window(), SyncScope::any()).unwrap();
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
         assert_eq!(ar.to_recv, vec![sid(4, 4)]);
         assert!(ar.to_send.is_empty());
         assert_eq!(br.to_send, ar.to_recv);
@@ -217,7 +237,7 @@ mod tests {
     fn both_sided_extras() {
         let alice = store(&[(1, 1), (2, 2)]);
         let bob = store(&[(1, 1), (3, 3)]);
-        let (ar, br) = run_pair(&alice, &bob, window(), SyncScope::any()).unwrap();
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
         assert_eq!(ar.to_send, br.to_recv);
         assert_eq!(ar.to_recv, br.to_send);
         assert_eq!(ar.to_send, vec![sid(2, 2)]);
@@ -228,7 +248,7 @@ mod tests {
     fn empty_vs_nonempty() {
         let alice = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         let bob = store(&[(5, 9)]);
-        let (ar, br) = run_pair(&alice, &bob, window(), SyncScope::any()).unwrap();
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
         assert!(ar.to_send.is_empty());
         assert_eq!(ar.to_recv, vec![sid(5, 9)]);
         assert_eq!(br.to_send, ar.to_recv);
@@ -238,36 +258,10 @@ mod tests {
     #[test]
     fn empty_incoming_is_done() {
         let store = store(&[(1, 1)]);
-        let mut s = ReconcileSession::respond(SyncScope::any());
-        let round = s.step(&store, RangesData::empty(SyncScope::any())).unwrap();
-        assert!(matches!(round, ReconcileRound::Done(_)));
-    }
-
-    #[test]
-    fn scope_mismatch_yields_empty() {
-        let alice = store(&[(1, 1), (2, 2)]);
-        let bob = store(&[(1, 1)]);
-        let a_scope = SyncScope {
-            cluster: 1,
-            shards: vec![1],
-        };
-        let b_scope = SyncScope {
-            cluster: 2,
-            shards: vec![1],
-        };
-        let (mut sess, first) = ReconcileSession::initiate(&alice, window(), a_scope).unwrap();
-        let mut bob_sess = ReconcileSession::respond(b_scope);
-        match bob_sess.step(&bob, first).unwrap() {
-            ReconcileRound::Continue(msg) => {
-                assert!(msg.is_terminal());
-                match sess.step(&alice, msg).unwrap() {
-                    ReconcileRound::Done(r) => {
-                        assert!(r.to_send.is_empty() && r.to_recv.is_empty());
-                    }
-                    other => panic!("expected Done, got {other:?}"),
-                }
-            }
-            other => panic!("expected Continue(empty), got {other:?}"),
+        let s = Reconcile::respond(&store);
+        match s.step(ReconcileMessage::empty()).unwrap() {
+            ReconcileStep::Done { farewell: None, .. } => {}
+            other => panic!("expected Done without farewell, got {other:?}"),
         }
     }
 
@@ -283,27 +277,21 @@ mod tests {
         alice.insert(sid(1, 1)).unwrap();
         alice.insert(sid(2, 2)).unwrap();
         bob.insert(sid(1, 1)).unwrap();
-        let (mut sess, first) =
-            ReconcileSession::initiate(&alice, window(), SyncScope::any()).unwrap();
+        let (sess, first) = Reconcile::initiate(&alice, window()).unwrap();
         assert_eq!(first.ranges.len(), 1);
-        assert_eq!(first.ranges[0].kind, crate::range::RangeType::Fingerprint);
-        let mut bob_sess = ReconcileSession::respond(SyncScope::any());
-        match bob_sess.step(&bob, first).unwrap() {
-            ReconcileRound::Continue(msg) => {
-                assert_eq!(msg.ranges.len(), 1);
-                assert_eq!(msg.ranges[0].kind, crate::range::RangeType::ItemSet);
-                match &msg.ranges[0].content {
-                    crate::range::RangeContent::Items(set) => {
-                        assert!(!set.reconciled);
-                    }
-                    _ => panic!("expected item set"),
+        assert!(matches!(first.ranges[0], Range::Fingerprint { .. }));
+        let bob_sess = Reconcile::respond(&bob);
+        match bob_sess.step(first).unwrap() {
+            ReconcileStep::Next { message, .. } => {
+                assert_eq!(message.ranges.len(), 1);
+                match &message.ranges[0] {
+                    Range::Items { set, .. } => assert!(!set.reconciled),
+                    other => panic!("expected item set, got {other:?}"),
                 }
-                match sess.step(&alice, msg).unwrap() {
-                    ReconcileRound::Continue(reply) => match &reply.ranges[0].content {
-                        crate::range::RangeContent::Items(set) => {
-                            assert!(set.reconciled);
-                        }
-                        _ => panic!("expected reconciled item set"),
+                match sess.step(message).unwrap() {
+                    ReconcileStep::Next { message: reply, .. } => match &reply.ranges[0] {
+                        Range::Items { set, .. } => assert!(set.reconciled),
+                        other => panic!("expected reconciled item set, got {other:?}"),
                     },
                     other => panic!("{other:?}"),
                 }
@@ -316,27 +304,8 @@ mod tests {
     fn invalid_bounds_initiate() {
         let store = store(&[]);
         let a = SyncId::min_at(5);
-        let err = ReconcileSession::initiate(&store, RangeBounds { a, b: a }, SyncScope::any())
-            .unwrap_err();
+        let err = Reconcile::initiate(&store, RangeBounds { a, b: a }).unwrap_err();
         assert_eq!(err, ReconcileError::InvalidBounds);
-    }
-
-    #[test]
-    fn payload_mismatch() {
-        let store = store(&[(1, 1)]);
-        let mut s = ReconcileSession::respond(SyncScope::any());
-        let bad = RangesData {
-            scope: SyncScope::any(),
-            ranges: vec![Range {
-                bounds: window(),
-                kind: crate::range::RangeType::Skip,
-                content: crate::range::RangeContent::Fingerprint([0; 32]),
-            }],
-        };
-        assert_eq!(
-            s.step(&store, bad).unwrap_err(),
-            ReconcileError::PayloadMismatch
-        );
     }
 
     #[test]
@@ -346,13 +315,14 @@ mod tests {
             ..Default::default()
         };
         let store = ReconcileStore::new(cfg).unwrap();
-        let mut s = ReconcileSession::respond_with_config(SyncScope::any(), &store);
-        let fp = RangesData {
-            scope: SyncScope::any(),
+        let s = Reconcile::respond(&store);
+        let fp = ReconcileMessage {
             ranges: vec![Range::fingerprint(window(), [1u8; 32])],
         };
-        s.step(&store, fp.clone()).unwrap();
-        let err = s.step(&store, fp).unwrap_err();
+        let ReconcileStep::Next { next, .. } = s.step(fp.clone()).unwrap() else {
+            panic!("expected Next");
+        };
+        let err = next.step(fp).unwrap_err();
         assert!(matches!(err, ReconcileError::TooManyRounds { max: 1 }));
     }
 }

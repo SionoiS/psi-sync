@@ -1,32 +1,23 @@
-//! Per-payload processing (LIP-182 reconciliation heuristic).
+//! Per-message processing (LIP-182 reconciliation heuristic).
 
 use crate::bounds::RangeBounds;
 use crate::id::SyncId;
 use crate::partition::partition_range;
-use crate::range::{merge_skips, ItemSet, Range, RangeContent, RangeType, RangesData, SyncScope};
+use crate::range::{merge_skips, ItemSet, Range, ReconcileMessage};
 use crate::store::ReconcileStore;
 
-/// Result of processing one incoming payload.
+/// Result of processing one incoming message.
 pub(crate) struct ProcessOutput {
-    pub reply: RangesData,
+    pub reply: ReconcileMessage,
     pub to_send: Vec<SyncId>,
     pub to_recv: Vec<SyncId>,
 }
 
-/// Process `incoming` against `store` using `local_scope` on the reply.
+/// Process `incoming` against `store`.
 pub(crate) fn process_payload(
     store: &ReconcileStore,
-    local_scope: &SyncScope,
-    incoming: &RangesData,
+    incoming: &ReconcileMessage,
 ) -> ProcessOutput {
-    if !local_scope.compatible(&incoming.scope) {
-        return ProcessOutput {
-            reply: RangesData::empty(local_scope.clone()),
-            to_send: Vec::new(),
-            to_recv: Vec::new(),
-        };
-    }
-
     let mut reply_ranges = Vec::new();
     let mut to_send = Vec::new();
     let mut to_recv = Vec::new();
@@ -34,32 +25,27 @@ pub(crate) fn process_payload(
     let partitions = store.config().partitions;
 
     for range in &incoming.ranges {
-        match range.kind {
-            RangeType::Skip => {
-                reply_ranges.push(Range::skip(range.bounds));
+        match range {
+            Range::Skip { bounds } => {
+                reply_ranges.push(Range::skip(*bounds));
             }
-            RangeType::Fingerprint => {
-                let fp = match range.content {
-                    RangeContent::Fingerprint(fp) => fp,
-                    _ => continue,
-                };
+            Range::Fingerprint {
+                bounds,
+                fingerprint,
+            } => {
                 process_fingerprint(
                     store,
-                    range.bounds,
-                    fp,
+                    *bounds,
+                    *fingerprint,
                     threshold,
                     partitions,
                     &mut reply_ranges,
                 );
             }
-            RangeType::ItemSet => {
-                let set = match &range.content {
-                    RangeContent::Items(set) => set,
-                    _ => continue,
-                };
+            Range::Items { bounds, set } => {
                 process_item_set(
                     store,
-                    range.bounds,
+                    *bounds,
                     set,
                     &mut to_send,
                     &mut to_recv,
@@ -70,13 +56,11 @@ pub(crate) fn process_payload(
     }
 
     let reply_ranges = merge_skips(reply_ranges);
-    let all_skip =
-        !reply_ranges.is_empty() && reply_ranges.iter().all(|r| r.kind == RangeType::Skip);
+    let all_skip = !reply_ranges.is_empty() && reply_ranges.iter().all(Range::is_skip);
     let reply = if reply_ranges.is_empty() || all_skip {
-        RangesData::empty(local_scope.clone())
+        ReconcileMessage::empty()
     } else {
-        RangesData {
-            scope: local_scope.clone(),
+        ReconcileMessage {
             ranges: reply_ranges,
         }
     };

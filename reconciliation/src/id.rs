@@ -6,13 +6,13 @@ pub const EMPTY_HASH: [u8; 32] = [0u8; 32];
 /// All-ones hash. Used as an inclusive-max hash when needed.
 pub const FULL_HASH: [u8; 32] = [0xffu8; 32];
 
-/// Message identifier: creation time (nanoseconds by convention) and 32-byte hash.
+/// Item identifier: an ordering key and a 32-byte hash.
 ///
-/// Ordered by timestamp first, then hash. The crate does not interpret the
-/// timestamp unit except when partitioning a time interval.
+/// Ordered by timestamp first, then hash. The timestamp unit is the caller's;
+/// it is only used to split time intervals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SyncId {
-    /// Creation timestamp. Nanoseconds by LIP-182 convention.
+    /// Ordering key (caller-defined unit).
     pub timestamp: u64,
     /// 32-byte item hash supplied by the caller.
     pub hash: [u8; 32],

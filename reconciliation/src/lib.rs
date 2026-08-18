@@ -1,58 +1,69 @@
-//! Range-based set reconciliation ([LIP-182 WAKU-SYNC][lip]).
+//! Range-based set reconciliation ([LIP-182][lip] algorithm, Rust API).
 //!
-//! Two peers holding ordered [`SyncId`] sets exchange [`RangesData`] payloads
-//! until they agree on the symmetric difference: items to send and items to
-//! request. This is **not** private set intersection — see the `psi` crate for
-//! ECDH-PSI. This crate does **not** implement the LIP transfer protocol.
+//! Two peers holding ordered [`SyncId`] sets exchange [`ReconcileMessage`]s
+//! until they agree on the symmetric difference. This is **not** private set
+//! intersection — see the `psi` crate. There is no transfer protocol.
 //!
 //! [lip]: https://lip.logos.co/messaging/core/raw/sync.html
 //!
-//! ## Protocol
-//!
-//! 1. The initiator sends one [`RangeType::Fingerprint`] over a
-//!    [`RangeBounds`] window.
-//! 2. Each peer replies with Skip (XOR matches), an [`ItemSet`] (range is
-//!    small), or more fingerprints (range is large and is partitioned).
-//! 3. Item sets are compared with a merge walk. The first item set has
-//!    `reconciled = false`; the reply has `true` so both sides learn the
-//!    difference without a transfer protocol.
-//! 4. An empty [`RangesData::ranges`] list ends the session.
+//! The session is type-state: only [`Reconcile<Running>`] can [`Reconcile::step`].
+//! `step` consumes `self`, like `psi::PsiProtocol::compute`.
 //!
 //! ## Example
 //!
 //! ```
 //! use reconciliation::{
-//!     RangeBounds, ReconcileRound, ReconcileSession, ReconcileStore, SyncId, SyncScope,
+//!     RangeBounds, Reconcile, ReconcileStep, ReconcileStore, SyncId,
 //! };
 //!
-//! let mut alice = ReconcileStore::new(Default::default())?;
-//! let mut bob = ReconcileStore::new(Default::default())?;
-//! alice.insert(SyncId::new(1, [1u8; 32]))?;
-//! alice.insert(SyncId::new(2, [2u8; 32]))?;
-//! bob.insert(SyncId::new(1, [1u8; 32]))?;
+//! let mut alice_store = ReconcileStore::new(Default::default())?;
+//! let mut bob_store = ReconcileStore::new(Default::default())?;
+//! alice_store.insert(SyncId::new(1, [1u8; 32]))?;
+//! alice_store.insert(SyncId::new(2, [2u8; 32]))?;
+//! bob_store.insert(SyncId::new(1, [1u8; 32]))?;
 //!
 //! let bounds = RangeBounds::window(0, 10)?;
-//! let scope = SyncScope::any();
-//! let (mut a, first) = ReconcileSession::initiate(&alice, bounds, scope.clone())?;
-//! let mut b = ReconcileSession::respond(scope);
+//! let (mut alice, first) = Reconcile::initiate(&alice_store, bounds)?;
+//! let mut bob = Reconcile::respond(&bob_store);
 //!
 //! let mut incoming = first;
 //! let (ar, br) = loop {
-//!     match b.step(&bob, incoming)? {
-//!         ReconcileRound::Continue(msg) => {
-//!             if msg.is_terminal() {
-//!                 let ar = match a.step(&alice, msg)? {
-//!                     ReconcileRound::Done(r) => r,
-//!                     ReconcileRound::Continue(_) => a.into_result(),
-//!                 };
-//!                 break (ar, b.into_result());
-//!             }
-//!             match a.step(&alice, msg)? {
-//!                 ReconcileRound::Continue(next) => incoming = next,
-//!                 ReconcileRound::Done(ar) => break (ar, b.into_result()),
+//!     match bob.step(incoming)? {
+//!         ReconcileStep::Next { next, message } => {
+//!             bob = next;
+//!             match alice.step(message)? {
+//!                 ReconcileStep::Next { next, message } => {
+//!                     alice = next;
+//!                     incoming = message;
+//!                 }
+//!                 ReconcileStep::Done { result, farewell } => {
+//!                     let br = match farewell {
+//!                         Some(msg) => match bob.step(msg)? {
+//!                             ReconcileStep::Done { result, .. } => result,
+//!                             ReconcileStep::Next { .. } => unreachable!(),
+//!                         },
+//!                         None => match bob.step(reconciliation::ReconcileMessage::empty())? {
+//!                             ReconcileStep::Done { result, .. } => result,
+//!                             ReconcileStep::Next { .. } => unreachable!(),
+//!                         },
+//!                     };
+//!                     break (result, br);
+//!                 }
 //!             }
 //!         }
-//!         ReconcileRound::Done(br) => break (a.into_result(), br),
+//!         ReconcileStep::Done { result, farewell } => {
+//!             let ar = match farewell {
+//!                 Some(msg) => match alice.step(msg)? {
+//!                     ReconcileStep::Done { result, .. } => result,
+//!                     ReconcileStep::Next { .. } => unreachable!(),
+//!                 },
+//!                 None => match alice.step(reconciliation::ReconcileMessage::empty())? {
+//!                     ReconcileStep::Done { result, .. } => result,
+//!                     ReconcileStep::Next { .. } => unreachable!(),
+//!                 },
+//!             };
+//!             break (ar, result);
+//!         }
 //!     }
 //! };
 //!
@@ -63,25 +74,22 @@
 //!
 //! ## Threat model
 //!
-//! LIP-182 treats participants as fully trusted and assumes hashes belong to
-//! valid messages. Fingerprints leak the XOR of hashes in a range. Item sets
-//! leak every [`SyncId`] in a differing range. A peer can Skip or invent IDs.
-//! Use an authenticated channel.
+//! Peers are trusted to follow the protocol. Fingerprints leak the XOR of
+//! hashes in a range. Item sets leak every [`SyncId`] in a differing range.
+//! A peer can Skip or invent IDs. Use an authenticated channel.
 //!
 //! ## Codec
 //!
-//! [`codec::encode`] / [`codec::decode`] implement LIP LEB128 + range deltas.
-//! The first range’s lower **timestamp** is written explicitly (Nwaku). The
-//! LIP text that the first lower bound is `SyncID(0, 0)` would drop a sliding
-//! window start; this crate does not do that. There is no libp2p length prefix.
+//! [`codec::encode`] / [`codec::decode`] are optional. The session never
+//! calls them. Cluster/shard headers are written as zero and ignored.
 
 pub use bounds::RangeBounds;
-pub use codec::{decode, encode};
 pub use config::ReconcileConfig;
 pub use error::{ReconcileError, Result};
 pub use id::{SyncId, EMPTY_HASH, FULL_HASH};
-pub use range::{ItemSet, Range, RangeContent, RangeType, RangesData, SyncScope};
-pub use session::{ReconcileResult, ReconcileRound, ReconcileSession};
+pub use range::{ItemSet, Range, ReconcileMessage};
+pub use session::{Reconcile, ReconcileResult, ReconcileStep};
+pub use state::{ReconcileState, Running};
 pub use store::ReconcileStore;
 
 pub mod codec;
@@ -95,6 +103,7 @@ mod partition;
 mod process;
 mod range;
 mod session;
+mod state;
 mod store;
 
 #[cfg(test)]
@@ -132,7 +141,7 @@ mod integration_tests {
             bob.fingerprint(bounds),
             "test hashes must not XOR-collide"
         );
-        let (ar, br) = run_pair(&alice, &bob, bounds, SyncScope::any()).unwrap();
+        let (ar, br) = run_pair(&alice, &bob, bounds).unwrap();
         assert_eq!(ar.to_send.len(), 50);
         assert_eq!(ar.to_recv.len(), 50);
         assert_eq!(ar.to_send, br.to_recv);

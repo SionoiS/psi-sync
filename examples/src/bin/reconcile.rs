@@ -1,29 +1,30 @@
-//! In-memory LIP-182 reconciliation demo.
+//! In-memory range-based reconciliation demo.
 //!
 //! Run with:
 //! ```bash
 //! cargo run -p examples --bin reconcile
 //! ```
 
-use reconciliation::{
-    encode, RangeBounds, ReconcileRound, ReconcileSession, ReconcileStore, SyncId, SyncScope,
-};
 use rand::rngs::OsRng;
 use rand::RngCore;
+use reconciliation::{
+    codec, RangeBounds, Reconcile, ReconcileMessage, ReconcileResult, ReconcileStep,
+    ReconcileStore, SyncId,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Range-based set reconciliation (LIP-182) ===\n");
+    println!("=== Range-based set reconciliation ===\n");
 
     let mut rng = OsRng;
     let mut alice_store = ReconcileStore::new(Default::default())?;
     let mut bob_store = ReconcileStore::new(Default::default())?;
 
-    let mut shared = Vec::new();
+    let mut shared = 0usize;
     for _ in 0..20 {
         let id = random_id(&mut rng, 1_000, 2_000);
         alice_store.insert(id)?;
         bob_store.insert(id)?;
-        shared.push(id);
+        shared += 1;
     }
     for _ in 0..180 {
         alice_store.insert(random_id(&mut rng, 1_000, 2_000))?;
@@ -32,58 +33,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Alice: {} items", alice_store.len());
     println!("Bob:   {} items", bob_store.len());
-    println!("Shared (inserted): {}\n", shared.len());
+    println!("Shared (inserted): {shared}\n");
 
     let bounds = RangeBounds::window(0, 10_000)?;
-    let scope = SyncScope::any();
-    let (mut alice, first) = ReconcileSession::initiate(&alice_store, bounds, scope.clone())?;
-    let mut bob = ReconcileSession::respond_with_config(scope, &bob_store);
+    let (alice, first) = Reconcile::initiate(&alice_store, bounds)?;
+    let bob = Reconcile::respond(&bob_store);
 
-    println!("First payload: {} bytes\n", encode(&first).len());
+    println!("First message: {} bytes\n", codec::encode(&first).len());
 
-    let mut incoming = first;
-    let mut rounds = 0u32;
-    let (alice_result, bob_result) = loop {
-        rounds += 1;
-        match bob.step(&bob_store, incoming)? {
-            ReconcileRound::Continue(msg) => {
-                println!(
-                    "round {rounds}: Bob → Alice ({} ranges, {} bytes)",
-                    msg.ranges.len(),
-                    encode(&msg).len()
-                );
-                if msg.is_terminal() {
-                    let ar = match alice.step(&alice_store, msg)? {
-                        ReconcileRound::Done(r) => r,
-                        ReconcileRound::Continue(_) => alice.into_result(),
-                    };
-                    break (ar, bob.into_result());
-                }
-                match alice.step(&alice_store, msg)? {
-                    ReconcileRound::Continue(next) => {
-                        println!(
-                            "round {rounds}: Alice → Bob ({} ranges, {} bytes)",
-                            next.ranges.len(),
-                            encode(&next).len()
-                        );
-                        if next.is_terminal() {
-                            let br = match bob.step(&bob_store, next)? {
-                                ReconcileRound::Done(r) => r,
-                                ReconcileRound::Continue(_) => bob.into_result(),
-                            };
-                            break (alice.into_result(), br);
-                        }
-                        incoming = next;
-                    }
-                    ReconcileRound::Done(ar) => break (ar, bob.into_result()),
-                }
-            }
-            ReconcileRound::Done(br) => break (alice.into_result(), br),
-        }
-    };
+    let (alice_result, bob_result) = run(alice, bob, first)?;
 
     println!(
-        "\nAlice to_send={} to_recv={}",
+        "Alice to_send={} to_recv={}",
         alice_result.to_send.len(),
         alice_result.to_recv.len()
     );
@@ -98,6 +59,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nDiffs are complementary.");
 
     Ok(())
+}
+
+fn run<'a>(
+    mut alice: Reconcile<'a, reconciliation::Running>,
+    mut bob: Reconcile<'a, reconciliation::Running>,
+    mut incoming: ReconcileMessage,
+) -> Result<(ReconcileResult, ReconcileResult), reconciliation::ReconcileError> {
+    let mut rounds = 0u32;
+    loop {
+        rounds += 1;
+        match bob.step(incoming)? {
+            ReconcileStep::Next { next, message } => {
+                println!(
+                    "round {rounds}: Bob → Alice ({} ranges, {} bytes)",
+                    message.ranges.len(),
+                    codec::encode(&message).len()
+                );
+                bob = next;
+                match alice.step(message)? {
+                    ReconcileStep::Next { next, message } => {
+                        println!(
+                            "round {rounds}: Alice → Bob ({} ranges, {} bytes)",
+                            message.ranges.len(),
+                            codec::encode(&message).len()
+                        );
+                        alice = next;
+                        incoming = message;
+                    }
+                    ReconcileStep::Done { result, farewell } => {
+                        return Ok((result, close(bob, farewell)?));
+                    }
+                }
+            }
+            ReconcileStep::Done { result, farewell } => {
+                return Ok((close(alice, farewell)?, result));
+            }
+        }
+    }
+}
+
+fn close(
+    session: Reconcile<'_, reconciliation::Running>,
+    farewell: Option<ReconcileMessage>,
+) -> Result<ReconcileResult, reconciliation::ReconcileError> {
+    let msg = farewell.unwrap_or_else(ReconcileMessage::empty);
+    match session.step(msg)? {
+        ReconcileStep::Done { result, .. } => Ok(result),
+        ReconcileStep::Next { .. } => panic!("closer must finish the session"),
+    }
 }
 
 fn random_id(rng: &mut OsRng, t0: u64, t1: u64) -> SyncId {

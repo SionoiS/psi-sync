@@ -25,9 +25,6 @@ impl RangeBounds {
     }
 
     /// Time window `[min_at(start), min_at(end))`.
-    ///
-    /// This is the form the LIP codec can represent: the first lower hash is
-    /// implicit zero on the wire.
     pub fn window(start: u64, end: u64) -> Result<Self> {
         Self::new(SyncId::min_at(start), SyncId::min_at(end))
     }

@@ -1,76 +1,78 @@
-//! LIP-182 payload encoding (LEB128 + range deltas).
+//! Optional LIP-182 bytes for a [`ReconcileMessage`].
 //!
-//! Logical bounds stay explicit. On the wire the first range’s lower hash is
-//! implicit zero (Nwaku / LIP). A sliding window should therefore use
-//! [`RangeBounds::window`]. The LIP’s “first lower bound is `SyncID(0,0)`”
-//! wording would drop the window start; this codec encodes the first
-//! `a.timestamp` explicitly, matching Nwaku.
+//! The session API never uses this module. Cluster/shard fields are written as
+//! zeros and ignored on decode. An empty message encodes as a single `0` byte.
 
 use crate::bounds::RangeBounds;
-use crate::error::{ReconcileError, Result};
 use crate::id::{SyncId, EMPTY_HASH};
-use crate::range::{ItemSet, Range, RangeContent, RangeType, RangesData, SyncScope};
+use crate::range::{ItemSet, Range, ReconcileMessage};
 
-/// Encode a payload. An empty range list is a single `0` byte (Nim interop).
-pub fn encode(payload: &RangesData) -> Vec<u8> {
-    if payload.ranges.is_empty() {
+/// Wire-format error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("codec error: {0}")]
+pub struct Error(pub String);
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Encode a message. Empty `ranges` is a single `0` byte.
+pub fn encode(message: &ReconcileMessage) -> Vec<u8> {
+    if message.ranges.is_empty() {
         return vec![0];
     }
 
     let mut out = Vec::new();
-    write_uleb128(&mut out, payload.scope.cluster);
-    write_uleb128(&mut out, payload.scope.shards.len() as u64);
-    for shard in &payload.scope.shards {
-        write_uleb128(&mut out, *shard);
-    }
+    write_uleb128(&mut out, 0); // cluster
+    write_uleb128(&mut out, 0); // shard count
 
-    let first_a = payload.ranges[0].bounds.a;
+    let first_a = message.ranges[0].bounds().a;
     write_uleb128(&mut out, first_a.timestamp);
 
     let mut last_time = first_a.timestamp;
 
-    for range in &payload.ranges {
-        let b = range.bounds.b;
+    for range in &message.ranges {
+        let b = range.bounds().b;
         let time_diff = b.timestamp.wrapping_sub(last_time);
         write_uleb128(&mut out, time_diff);
         if time_diff == 0 {
-            // Full hash: LIP prefix-delta is lossy for hash-space cuts.
             out.push(32);
             out.extend_from_slice(&b.hash);
         }
         last_time = b.timestamp;
 
-        out.push(range.kind as u8);
-        match &range.content {
-            RangeContent::None => {}
-            RangeContent::Fingerprint(fp) => out.extend_from_slice(fp),
-            RangeContent::Items(set) => write_item_set(&mut out, set),
+        match range {
+            Range::Skip { .. } => out.push(0),
+            Range::Fingerprint { fingerprint, .. } => {
+                out.push(1);
+                out.extend_from_slice(fingerprint);
+            }
+            Range::Items { set, .. } => {
+                out.push(2);
+                write_item_set(&mut out, set);
+            }
         }
     }
 
     out
 }
 
-/// Decode a payload. A lone `0` is an empty payload with default scope.
-pub fn decode(bytes: &[u8]) -> Result<RangesData> {
+/// Decode a message. A lone `0` is empty. Cluster/shards in the header are discarded.
+pub fn decode(bytes: &[u8]) -> Result<ReconcileMessage> {
     if bytes.is_empty() {
-        return Err(ReconcileError::CodecError("empty buffer".into()));
+        return Err(Error("empty buffer".into()));
     }
     if bytes == [0] {
-        return Ok(RangesData::empty(SyncScope::any()));
+        return Ok(ReconcileMessage::empty());
     }
 
     let mut idx = 0;
-    let cluster = read_uleb128(bytes, &mut idx)?;
+    let _cluster = read_uleb128(bytes, &mut idx)?;
     let nshards = read_uleb128(bytes, &mut idx)?;
-    let mut shards = Vec::with_capacity(nshards as usize);
     for _ in 0..nshards {
-        shards.push(read_uleb128(bytes, &mut idx)?);
+        let _ = read_uleb128(bytes, &mut idx)?;
     }
-    let scope = SyncScope { cluster, shards };
 
     if idx >= bytes.len() {
-        return Ok(RangesData::empty(scope));
+        return Ok(ReconcileMessage::empty());
     }
 
     let first_time = read_uleb128(bytes, &mut idx)?;
@@ -98,39 +100,33 @@ pub fn decode(bytes: &[u8]) -> Result<RangesData> {
             timestamp: this_time,
             hash,
         };
-        let bounds = RangeBounds::new(prev, upper)?;
+        let bounds = RangeBounds::new(prev, upper).map_err(|_| Error("invalid bounds".into()))?;
         prev = upper;
 
         if idx >= bytes.len() {
-            return Err(ReconcileError::CodecError("truncated range type".into()));
+            return Err(Error("truncated range type".into()));
         }
-        let kind = RangeType::from_u8(bytes[idx])?;
+        let kind = bytes[idx];
         idx += 1;
 
-        let content = match kind {
-            RangeType::Skip => RangeContent::None,
-            RangeType::Fingerprint => {
+        let range = match kind {
+            0 => Range::skip(bounds),
+            1 => {
                 if idx + 32 > bytes.len() {
-                    return Err(ReconcileError::CodecError("truncated fingerprint".into()));
+                    return Err(Error("truncated fingerprint".into()));
                 }
                 let mut fp = [0u8; 32];
                 fp.copy_from_slice(&bytes[idx..idx + 32]);
                 idx += 32;
-                RangeContent::Fingerprint(fp)
+                Range::fingerprint(bounds, fp)
             }
-            RangeType::ItemSet => RangeContent::Items(read_item_set(bytes, &mut idx)?),
+            2 => Range::item_set(bounds, read_item_set(bytes, &mut idx)?),
+            other => return Err(Error(format!("invalid range type {other}"))),
         };
-
-        let range = Range {
-            bounds,
-            kind,
-            content,
-        };
-        range.validate()?;
         ranges.push(range);
     }
 
-    Ok(RangesData { scope, ranges })
+    Ok(ReconcileMessage { ranges })
 }
 
 fn write_item_set(out: &mut Vec<u8>, set: &ItemSet) {
@@ -159,7 +155,7 @@ fn read_item_set(bytes: &[u8], idx: &mut usize) -> Result<ItemSet> {
             last_time.wrapping_add(read_uleb128(bytes, idx)?)
         };
         if *idx + 32 > bytes.len() {
-            return Err(ReconcileError::CodecError("truncated item hash".into()));
+            return Err(Error("truncated item hash".into()));
         }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&bytes[*idx..*idx + 32]);
@@ -171,20 +167,14 @@ fn read_item_set(bytes: &[u8], idx: &mut usize) -> Result<ItemSet> {
         last_time = time;
     }
     if *idx >= bytes.len() {
-        return Err(ReconcileError::CodecError(
-            "truncated reconciled flag".into(),
-        ));
+        return Err(Error("truncated reconciled flag".into()));
     }
     let flag = bytes[*idx];
     *idx += 1;
     let reconciled = match flag {
         0 => false,
         1 => true,
-        _ => {
-            return Err(ReconcileError::CodecError(format!(
-                "invalid reconciled byte {flag}"
-            )))
-        }
+        _ => return Err(Error(format!("invalid reconciled byte {flag}"))),
     };
     Ok(ItemSet {
         elements,
@@ -195,8 +185,8 @@ fn read_item_set(bytes: &[u8], idx: &mut usize) -> Result<ItemSet> {
 #[cfg(test)]
 fn write_hash_delta(out: &mut Vec<u8>, prev: &[u8; 32], next: &[u8; 32]) {
     let mut n = 32usize;
-    for i in 0..32 {
-        if prev[i] != next[i] {
+    for (i, (p, nbyte)) in prev.iter().zip(next.iter()).enumerate() {
+        if p != nbyte {
             n = i + 1;
             break;
         }
@@ -207,12 +197,12 @@ fn write_hash_delta(out: &mut Vec<u8>, prev: &[u8; 32], next: &[u8; 32]) {
 
 fn read_hash_delta(bytes: &[u8], idx: &mut usize, prev: &[u8; 32]) -> Result<[u8; 32]> {
     if *idx >= bytes.len() {
-        return Err(ReconcileError::CodecError("truncated hash delta".into()));
+        return Err(Error("truncated hash delta".into()));
     }
     let n = bytes[*idx] as usize;
     *idx += 1;
     if n > 32 || *idx + n > bytes.len() {
-        return Err(ReconcileError::CodecError("invalid hash delta".into()));
+        return Err(Error("invalid hash delta".into()));
     }
     let mut hash = *prev;
     hash[..n].copy_from_slice(&bytes[*idx..*idx + n]);
@@ -239,13 +229,13 @@ fn read_uleb128(bytes: &[u8], idx: &mut usize) -> Result<u64> {
     let mut shift = 0;
     loop {
         if *idx >= bytes.len() {
-            return Err(ReconcileError::CodecError("truncated varint".into()));
+            return Err(Error("truncated varint".into()));
         }
         let byte = bytes[*idx];
         *idx += 1;
         let digit = (byte & 0x7f) as u64;
         if shift >= 64 || (digit << shift) >> shift != digit {
-            return Err(ReconcileError::CodecError("varint overflow".into()));
+            return Err(Error("varint overflow".into()));
         }
         result |= digit << shift;
         if byte & 0x80 == 0 {
@@ -268,7 +258,7 @@ mod tests {
 
     #[test]
     fn empty_is_single_zero() {
-        let p = RangesData::empty(SyncScope::any());
+        let p = ReconcileMessage::empty();
         assert_eq!(encode(&p), vec![0]);
         assert_eq!(decode(&[0]).unwrap(), p);
     }
@@ -276,15 +266,10 @@ mod tests {
     #[test]
     fn round_trip_fingerprint() {
         let bounds = RangeBounds::window(1000, 2000).unwrap();
-        let payload = RangesData {
-            scope: SyncScope {
-                cluster: 1,
-                shards: vec![2, 3],
-            },
+        let payload = ReconcileMessage {
             ranges: vec![Range::fingerprint(bounds, [0xab; 32])],
         };
-        let bytes = encode(&payload);
-        assert_eq!(decode(&bytes).unwrap(), payload);
+        assert_eq!(decode(&encode(&payload)).unwrap(), payload);
     }
 
     #[test]
@@ -294,8 +279,7 @@ mod tests {
             elements: vec![sid(11, 1), sid(12, 2)],
             reconciled: true,
         };
-        let payload = RangesData {
-            scope: SyncScope::any(),
+        let payload = ReconcileMessage {
             ranges: vec![Range::item_set(bounds, set)],
         };
         assert_eq!(decode(&encode(&payload)).unwrap(), payload);
@@ -303,8 +287,7 @@ mod tests {
 
     #[test]
     fn round_trip_skip_then_fingerprint() {
-        let payload = RangesData {
-            scope: SyncScope::any(),
+        let payload = ReconcileMessage {
             ranges: vec![
                 Range::skip(RangeBounds::window(0, 10).unwrap()),
                 Range::fingerprint(RangeBounds::window(10, 20).unwrap(), [7u8; 32]),
@@ -315,7 +298,6 @@ mod tests {
 
     #[test]
     fn hash_delta_matches_lip_table() {
-        // prev 0x351c…, next 0x3560… → length 2, bytes 0x35 0x60
         let mut prev = [0u8; 32];
         prev[0] = 0x35;
         prev[1] = 0x1c;
