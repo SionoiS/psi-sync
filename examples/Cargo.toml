@@ -1,5 +1,5 @@
 [package]
-name = "psi-examples"
+name = "examples"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -10,6 +10,11 @@ publish = false
 name = "in_memory"
 path = "src/bin/in_memory.rs"
 
+[[bin]]
+name = "reconcile"
+path = "src/bin/reconcile.rs"
+
 [dependencies]
-psi-protocol = { path = "../psi-protocol" }
+psi = { path = "../psi" }
+reconciliation = { path = "../reconciliation" }
 rand.workspace = true

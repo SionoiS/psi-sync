@@ -53,11 +53,11 @@ impl PsiProtocol<PreparedState> {
     /// # Example
     ///
     /// ```
-    /// use psi_protocol::PsiProtocol;
+    /// use psi::PsiProtocol;
     ///
     /// let items = vec![b"apple".to_vec(), b"banana".to_vec()];
     /// let alice = PsiProtocol::new(&items)?;
-    /// # Ok::<(), psi_protocol::PsiError>(())
+    /// # Ok::<(), psi::PsiError>(())
     /// ```
     pub fn new(items: &[Vec<u8>]) -> Result<Self> {
         let hash_to_point = hash_inputs_to_points(items);
@@ -80,13 +80,13 @@ impl PsiProtocol<PreparedState> {
     /// # Example
     ///
     /// ```
-    /// use psi_protocol::PsiProtocol;
+    /// use psi::PsiProtocol;
     ///
     /// let items = vec![b"apple".to_vec()];
     /// let alice = PsiProtocol::new(&items)?;
     /// let alice_msg = alice.message();
     /// assert_eq!(alice_msg.len(), 1);
-    /// # Ok::<(), psi_protocol::PsiError>(())
+    /// # Ok::<(), psi::PsiError>(())
     /// ```
     pub fn message(&self) -> BlindedPointsMessage {
         let blinded_points: Vec<CompressedRistretto> = self
@@ -119,14 +119,14 @@ impl PsiProtocol<PreparedState> {
     /// # Example
     ///
     /// ```
-    /// use psi_protocol::PsiProtocol;
+    /// use psi::PsiProtocol;
     ///
     /// let alice = PsiProtocol::new(&[b"apple".to_vec()])?;
     /// let bob = PsiProtocol::new(&[b"apple".to_vec()])?;
     /// let bob_msg = bob.message();
     /// let (_alice_mid, alice_double) = alice.compute(bob_msg)?;
     /// assert_eq!(alice_double.len(), 1);
-    /// # Ok::<(), psi_protocol::PsiError>(())
+    /// # Ok::<(), psi::PsiError>(())
     /// ```
     pub fn compute(
         self,
@@ -172,7 +172,7 @@ impl PsiProtocol<DoubleBlindedState> {
     /// # Example
     ///
     /// ```
-    /// use psi_protocol::PsiProtocol;
+    /// use psi::PsiProtocol;
     ///
     /// let alice = PsiProtocol::new(&[b"apple".to_vec(), b"banana".to_vec()])?;
     /// let bob = PsiProtocol::new(&[b"banana".to_vec(), b"cherry".to_vec()])?;
@@ -187,7 +187,7 @@ impl PsiProtocol<DoubleBlindedState> {
     /// let bob_result = bob_mid.finalize(alice_double)?;
     /// assert_eq!(alice_result.len(), 1);
     /// assert_eq!(bob_result.len(), 1);
-    /// # Ok::<(), psi_protocol::PsiError>(())
+    /// # Ok::<(), psi::PsiError>(())
     /// ```
     pub fn finalize(self, remote_msg: DoubleBlindedPointsMessage) -> Result<PsiResult> {
         let expected = self.state.hash_order().len();
@@ -237,33 +237,33 @@ mod tests {
     }
 
     #[test]
-    fn test_psi_protocol_new_empty() {
+    fn test_psi_new_empty() {
         let proto = PsiProtocol::new(&[]).unwrap();
         assert_eq!(proto.message().len(), 0);
     }
 
     #[test]
-    fn test_psi_protocol_new_single_item() {
+    fn test_psi_new_single_item() {
         let items = vec![b"test".to_vec()];
         let proto = PsiProtocol::new(&items).unwrap();
         assert_eq!(proto.message().len(), 1);
     }
 
     #[test]
-    fn test_psi_protocol_new_multiple_items() {
+    fn test_psi_new_multiple_items() {
         let items = vec![b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()];
         let proto = PsiProtocol::new(&items).unwrap();
         assert_eq!(proto.message().len(), 3);
     }
 
     #[test]
-    fn test_psi_protocol_duplicate_items() {
+    fn test_psi_duplicate_items() {
         let proto = PsiProtocol::new(&[b"apple".to_vec(), b"apple".to_vec()]).unwrap();
         assert_eq!(proto.message().len(), 1);
     }
 
     #[test]
-    fn test_psi_protocol_compute_no_intersection() {
+    fn test_psi_compute_no_intersection() {
         let alice = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
         let bob = PsiProtocol::new(&[b"banana".to_vec()]).unwrap();
 
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn test_psi_protocol_compute_with_intersection() {
+    fn test_psi_compute_with_intersection() {
         let alice = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
         let bob = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
 
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_psi_protocol_compute_symmetric() {
+    fn test_psi_compute_symmetric() {
         let alice =
             PsiProtocol::new(&[b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()]).unwrap();
         let bob = PsiProtocol::new(&[b"banana".to_vec(), b"date".to_vec()]).unwrap();
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn test_psi_protocol_empty_vs_nonempty() {
+    fn test_psi_empty_vs_nonempty() {
         let alice = PsiProtocol::new(&[]).unwrap();
         let bob = PsiProtocol::new(&[b"banana".to_vec()]).unwrap();
 
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn test_psi_protocol_unequal_sizes() {
+    fn test_psi_unequal_sizes() {
         let shared = b"shared".to_vec();
         let alice = PsiProtocol::new(&[
             b"a1".to_vec(),

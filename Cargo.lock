@@ -75,6 +75,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "examples"
+version = "0.2.0"
+dependencies = [
+ "psi",
+ "rand",
+ "reconciliation",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -126,15 +135,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "psi-examples"
-version = "0.2.0"
-dependencies = [
- "psi-protocol",
- "rand",
-]
-
-[[package]]
-name = "psi-protocol"
+name = "psi"
 version = "0.2.0"
 dependencies = [
  "curve25519-dalek",
@@ -181,6 +182,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom",
+]
+
+[[package]]
+name = "reconciliation"
+version = "0.2.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

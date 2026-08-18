@@ -1,16 +1,12 @@
 [package]
-name = "psi-protocol"
+name = "reconciliation"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
-description.workspace = true
+description = "Range-based set reconciliation (LIP-182 WAKU-SYNC)"
 
 [dependencies]
-curve25519-dalek.workspace = true
-sha2.workspace = true
-rand.workspace = true
 thiserror.workspace = true
-zeroize.workspace = true

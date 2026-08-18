@@ -1,21 +1,24 @@
 # psi-sync
 
-Two-party [private set intersection](https://en.wikipedia.org/wiki/Private_set_intersection) in Rust.
-
-Each party holds a private set of byte strings. After two message exchanges they both learn the SHA-512/256 identifiers of the items they share, and nothing else about the other set.
-
-The protocol is ECDH-PSI on the [Ristretto](https://ristretto.group/) group (`curve25519-dalek` 4). The library is transport- and codec-agnostic: you serialize the two message types and send them on your own channel.
-
-## Crate
+Rust workspace with two complementary two-party set protocols:
 
 | Crate | Role |
 | --- | --- |
-| `psi-protocol` | The library |
-| `psi-examples` | In-process demo (`in_memory`) |
+| `psi` | ECDH **private set intersection** on Ristretto |
+| `reconciliation` | **Range-based set reconciliation** ([LIP-182 WAKU-SYNC](https://lip.logos.co/messaging/core/raw/sync.html)) |
+| `examples` | In-process demos (`in_memory`, `reconcile`) |
 
-## Protocol
+They solve different problems. PSI hides exclusive items and returns only the intersection. Reconciliation finds the symmetric difference so two stores can converge; differing ranges **reveal identifiers**.
 
-Both peers do the same thing:
+---
+
+## `psi` (PSI)
+
+Each party holds a private set of byte strings. After two message exchanges they both learn the SHA-512/256 identifiers of the items they share, and nothing else about the other set.
+
+The protocol is ECDH-PSI on the [Ristretto](https://ristretto.group/) group (`curve25519-dalek` 4). Transport- and codec-agnostic.
+
+### Flow
 
 1. `PsiProtocol::new(&items)` — hash items, map to the curve (DST `psi-sync/v1`), blind with a fresh scalar.
 2. Exchange `BlindedPointsMessage` from `message()`.
@@ -23,12 +26,12 @@ Both peers do the same thing:
 4. Exchange that second message. **Order is significant**: each returned point must correspond to the received point at the same index.
 5. `finalize(peer_double)` — `PsiResult` with `intersection_hashes`.
 
-Empty sets are valid (intersection is empty). Duplicate items collapse. At most `MAX_ITEMS` (`1_048_576`) distinct items per set or incoming message.
+Empty sets are valid. Duplicate items collapse. At most `MAX_ITEMS` (`1_048_576`) distinct items.
 
-## Usage
+### Usage
 
 ```rust
-use psi_protocol::{hash_bytes, PsiProtocol};
+use psi::{hash_bytes, PsiProtocol};
 
 let alice_items = vec![b"apple".to_vec(), b"banana".to_vec()];
 let bob_items = vec![b"banana".to_vec(), b"cherry".to_vec()];
@@ -38,51 +41,96 @@ let bob = PsiProtocol::new(&bob_items)?;
 
 let alice_msg = alice.message();
 let bob_msg = bob.message();
-// send_to_peer(alice_msg);  // authenticated + confidential + order-preserving
-// let bob_msg = recv_from_peer();
 
 let (alice_mid, alice_double) = alice.compute(bob_msg)?;
 let (bob_mid, bob_double) = bob.compute(alice_msg)?;
-// exchange alice_double / bob_double the same way
 
 let alice_result = alice_mid.finalize(bob_double)?;
 let bob_result = bob_mid.finalize(alice_double)?;
 assert_eq!(alice_result.len(), 1);
 
-// Map identifiers back to local items.
 let banana = hash_bytes(b"banana");
 assert!(alice_result.intersection_hashes.contains(&banana));
-# Ok::<(), psi_protocol::PsiError>(())
+# Ok::<(), psi::PsiError>(())
 ```
 
-### Serializing messages
+A compressed Ristretto point is 32 bytes (`CompressedRistretto::to_bytes()`). There is no serde feature.
 
-There is no serde feature. A compressed Ristretto point is 32 bytes:
+### PSI threat model
 
-```text
-CompressedRistretto::to_bytes() -> [u8; 32]
-CompressedRistretto([u8; 32])   // reconstruct; decompress is checked in compute()
+Honest-but-curious peers. The channel **must** be authenticated, confidential, and **order-preserving**. Set sizes leak. A malicious peer can lie. Intersection comparison is not constant-time.
+
+---
+
+## `reconciliation` (LIP-182)
+
+Range-based set reconciliation. Items are [`SyncId`](https://lip.logos.co/messaging/core/raw/sync.html) `{ timestamp, hash }`, ordered by time then hash. Peers exchange `RangesData` until they agree on `to_send` / `to_recv`.
+
+This crate implements **reconciliation only**, not the LIP transfer protocol and not Waku message hashing (you supply the 32-byte hash).
+
+### Flow
+
+1. `ReconcileSession::initiate(store, bounds, scope)` sends one XOR **fingerprint** over the window.
+2. Matching fingerprints become **Skip**. Small differing ranges become an **ItemSet**. Large ones are split (default 8-way time partition; hash-space fallback when timestamps collide).
+3. Item sets are merge-walked. The first set has `reconciled = false`; the reply has `true` so both sides learn the difference without a transfer protocol.
+4. An empty range list ends the session.
+
+`codec::encode` / `decode` implement LIP LEB128 + range deltas. The first range’s lower **timestamp** is written explicitly (Nwaku). The LIP wording that the first lower bound is `SyncID(0,0)` would drop a sliding window start; this crate does not do that. There is no libp2p length-prefix.
+
+### Usage
+
+```rust
+use reconciliation::{
+    RangeBounds, ReconcileRound, ReconcileSession, ReconcileStore, SyncId, SyncScope,
+};
+
+let mut alice = ReconcileStore::new(Default::default())?;
+let mut bob = ReconcileStore::new(Default::default())?;
+alice.insert(SyncId::new(1, [1u8; 32]))?;
+bob.insert(SyncId::new(1, [1u8; 32]))?;
+bob.insert(SyncId::new(2, [2u8; 32]))?;
+
+let (mut a, first) =
+    ReconcileSession::initiate(&alice, RangeBounds::window(0, 10)?, SyncScope::any())?;
+let mut b = ReconcileSession::respond(SyncScope::any());
+let mut incoming = first;
+let result = loop {
+    match b.step(&bob, incoming)? {
+        ReconcileRound::Continue(msg) => {
+            if msg.is_terminal() {
+                break match a.step(&alice, msg)? {
+                    ReconcileRound::Done(r) => r,
+                    ReconcileRound::Continue(_) => a.into_result(),
+                };
+            }
+            match a.step(&alice, msg)? {
+                ReconcileRound::Continue(next) => incoming = next,
+                ReconcileRound::Done(r) => break r,
+            }
+        }
+        ReconcileRound::Done(r) => break r,
+    }
+};
+assert_eq!(result.to_recv.len(), 1);
+# Ok::<(), reconciliation::ReconcileError>(())
 ```
 
-A message is a length plus that many 32-byte encodings, in order.
+### Reconciliation threat model
 
-## Threat model
+LIP-182 treats peers as **fully trusted**. Fingerprints leak the XOR of hashes in a range. Item sets leak every `SyncId` in a differing range. A peer can Skip or invent IDs. Prefer an authenticated channel. Cluster/shard mismatch yields an empty payload.
 
-Honest-but-curious (semi-honest) peers:
-
-- The channel **must** be authenticated, confidential, and **order-preserving** (for example TLS). Reordering the second message can make a party attribute the intersection to the wrong local items.
-- Set **sizes leak** (message lengths).
-- A **malicious peer can lie** about its set and about the second message. There are no proofs of correct computation.
-- Intersection comparison is not constant-time.
+---
 
 ## Develop
 
 ```bash
 cargo test --workspace
-cargo test --doc -p psi-protocol
+cargo test --doc -p psi
+cargo test --doc -p reconciliation
 cargo clippy --workspace --all-targets -- --deny warnings
 cargo fmt --all -- --check
-cargo run -p psi-examples --bin in_memory
+cargo run -p examples --bin in_memory
+cargo run -p examples --bin reconcile
 ```
 
 ## License

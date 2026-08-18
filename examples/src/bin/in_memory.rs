@@ -6,10 +6,10 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo run -p psi-examples --bin in_memory
+//! cargo run -p examples --bin in_memory
 //! ```
 
-use psi_protocol::{hash_bytes, PsiProtocol, PsiResult};
+use psi::{hash_bytes, PsiProtocol, PsiResult};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use std::collections::HashSet;

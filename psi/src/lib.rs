@@ -34,7 +34,7 @@
 //! ## Example
 //!
 //! ```
-//! use psi_protocol::PsiProtocol;
+//! use psi::PsiProtocol;
 //!
 //! let alice_items = vec![b"apple".to_vec(), b"banana".to_vec()];
 //! let bob_items = vec![b"banana".to_vec(), b"cherry".to_vec()];
@@ -53,13 +53,13 @@
 //!
 //! assert_eq!(alice_result.len(), 1);
 //! assert_eq!(bob_result.len(), 1);
-//! # Ok::<(), psi_protocol::PsiError>(())
+//! # Ok::<(), psi::PsiError>(())
 //! ```
 //!
 //! Map result identifiers back to local items with [`hash_bytes`]:
 //!
 //! ```
-//! use psi_protocol::hash_bytes;
+//! use psi::hash_bytes;
 //!
 //! let item = b"banana";
 //! let id = hash_bytes(item);
