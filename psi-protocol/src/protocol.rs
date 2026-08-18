@@ -1,40 +1,58 @@
 //! Core protocol implementation using the type-state pattern.
 
-use crate::crypto::{decompress_point, hash_inputs_to_points, blind_points};
-use crate::messages::{BlindedPointsMessage, DoubleBlindedPointsMessage, PsiResult};
-use crate::state::{PsiState, PreparedState, DoubleBlindedState, FinalState};
+use crate::crypto::{blind_points, decompress_point, hash_inputs_to_points};
 use crate::error::{PsiError, Result};
+use crate::messages::{BlindedPointsMessage, DoubleBlindedPointsMessage, PsiResult};
+use crate::state::{DoubleBlindedState, PreparedState, PsiState};
 use curve25519_dalek::ristretto::CompressedRistretto;
 use std::collections::HashMap;
+use std::fmt;
+
+/// Maximum number of distinct items in a local set or incoming message.
+pub const MAX_ITEMS: usize = 1_048_576;
+
+/// Reject sets larger than [`MAX_ITEMS`].
+pub(crate) fn check_set_size(n: usize) -> Result<()> {
+    if n > MAX_ITEMS {
+        return Err(PsiError::SetTooLarge {
+            size: n,
+            max: MAX_ITEMS,
+        });
+    }
+    Ok(())
+}
 
 /// Protocol wrapper that holds the current state.
 ///
-/// This generic wrapper enforces type-level state tracking - each state
-/// has different available methods, preventing invalid operations.
-#[derive(Debug)]
+/// Each state exposes different methods, so invalid transitions do not compile.
 pub struct PsiProtocol<S: PsiState> {
     state: S,
+}
+
+impl<S: PsiState + fmt::Debug> fmt::Debug for PsiProtocol<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PsiProtocol")
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 impl PsiProtocol<PreparedState> {
     /// Create a new protocol instance from items.
     ///
-    /// This performs ALL initial setup in one call:
-    /// - Generates random secret scalar
-    /// - Hashes all items
-    /// - Blinds points with the secret
-    ///
-    /// # Arguments
-    /// * `items` - Slice of byte vectors representing the private set
-    ///
-    /// # Returns
-    /// A `PsiProtocol<PreparedState>` ready for message exchange
+    /// This performs all initial setup in one call: generate a secret scalar,
+    /// hash items to identifiers, map them to the curve, and blind the points.
+    /// Duplicate items collapse (set semantics). An empty input is valid and
+    /// produces an empty message; the intersection with any peer is empty.
     ///
     /// # Errors
-    /// Returns `PsiError::EmptyInput` if items is empty
+    ///
+    /// Returns [`PsiError::SetTooLarge`] if the number of distinct items exceeds
+    /// [`MAX_ITEMS`].
     ///
     /// # Example
-    /// ```ignore
+    ///
+    /// ```
     /// use psi_protocol::PsiProtocol;
     ///
     /// let items = vec![b"apple".to_vec(), b"banana".to_vec()];
@@ -42,84 +60,80 @@ impl PsiProtocol<PreparedState> {
     /// # Ok::<(), psi_protocol::PsiError>(())
     /// ```
     pub fn new(items: &[Vec<u8>]) -> Result<Self> {
-        if items.is_empty() {
-            return Err(PsiError::EmptyInput);
-        }
+        let hash_to_point = hash_inputs_to_points(items);
+        check_set_size(hash_to_point.len())?;
 
         let secret = crate::crypto::random_scalar();
-        let hash_to_point = hash_inputs_to_points(items);
         let hash_to_blinded = blind_points(&hash_to_point, &secret);
-
-        // Build reverse mapping from blinded point to hash
-        let blinded_to_hash: HashMap<CompressedRistretto, [u8; 32]> =
-            hash_to_blinded.iter()
-                .map(|(hash, point)| (*point, *hash))
-                .collect();
-
-        // Track the order of hashes (consistent with blinded_points iteration)
         let hash_order: Vec<[u8; 32]> = hash_to_blinded.keys().copied().collect();
 
         Ok(Self {
-            state: PreparedState::new(secret, hash_to_blinded, blinded_to_hash, hash_order),
+            state: PreparedState::new(secret, hash_to_blinded, hash_order),
         })
     }
 
-    /// Get the blinded points message for exchange with remote party.
+    /// Blinded points to send to the peer (no item identifiers).
     ///
-    /// Returns a message containing only blinded points (no hashes)
-    /// that should be sent to the remote party.
-    ///
-    /// # Returns
-    /// A `BlindedPointsMessage` ready to be serialized and sent
+    /// Order is significant: the peer must double-blind and return points in
+    /// this same order.
     ///
     /// # Example
-    /// ```ignore
+    ///
+    /// ```
+    /// use psi_protocol::PsiProtocol;
+    ///
+    /// let items = vec![b"apple".to_vec()];
     /// let alice = PsiProtocol::new(&items)?;
     /// let alice_msg = alice.message();
-    /// // send_to_remote(alice_msg);
+    /// assert_eq!(alice_msg.len(), 1);
+    /// # Ok::<(), psi_protocol::PsiError>(())
     /// ```
     pub fn message(&self) -> BlindedPointsMessage {
-        // Use hash_order to ensure consistent ordering
-        let blinded_points: Vec<CompressedRistretto> = self.state
+        let blinded_points: Vec<CompressedRistretto> = self
+            .state
             .hash_order()
             .iter()
-            .map(|hash| *self.state.blinded_map().get(hash).unwrap())
+            .map(|hash| {
+                *self
+                    .state
+                    .blinded_map()
+                    .get(hash)
+                    .expect("hash_order/blinded_map invariant")
+            })
             .collect();
         BlindedPointsMessage::new(blinded_points)
     }
 
-    /// Compute double-blinded points from remote's single-blinded points.
+    /// Double-blind the peer's first-round points.
     ///
-    /// This consumes the `PsiProtocol<PreparedState>` and returns:
-    /// - `PsiProtocol<DoubleBlindedState>` - intermediate state ready for finalization
-    /// - `DoubleBlindedPointsMessage` - message to send to remote party
-    ///
-    /// # Arguments
-    /// * `remote_msg` - The blinded points message received from the remote party
-    ///
-    /// # Returns
-    /// A tuple of (PsiProtocol<DoubleBlindedState>, DoubleBlindedPointsMessage)
+    /// Consumes `PreparedState` and returns an intermediate protocol object
+    /// plus the message to send back. The peer will `finalize` with that
+    /// message.
     ///
     /// # Errors
-    /// Returns `PsiError::InvalidBlindedPoints` if remote's points cannot be processed
+    ///
+    /// Returns [`PsiError::SetTooLarge`] if the peer sent more than
+    /// [`MAX_ITEMS`] points, or [`PsiError::CryptoError`] if a point does not
+    /// decompress.
     ///
     /// # Example
-    /// ```ignore
-    /// let alice = PsiProtocol::new(&items)?;
-    /// let alice_msg = alice.message();
-    /// let bob_msg = receive_from_remote();
     ///
-    /// let (alice_intermediate, alice_double_msg) = alice.compute(bob_msg)?;
-    /// // Exchange alice_double_msg with remote
+    /// ```
+    /// use psi_protocol::PsiProtocol;
+    ///
+    /// let alice = PsiProtocol::new(&[b"apple".to_vec()])?;
+    /// let bob = PsiProtocol::new(&[b"apple".to_vec()])?;
+    /// let bob_msg = bob.message();
+    /// let (_alice_mid, alice_double) = alice.compute(bob_msg)?;
+    /// assert_eq!(alice_double.len(), 1);
     /// # Ok::<(), psi_protocol::PsiError>(())
     /// ```
     pub fn compute(
         self,
         remote_msg: BlindedPointsMessage,
     ) -> Result<(PsiProtocol<DoubleBlindedState>, DoubleBlindedPointsMessage)> {
-        // Compute double-blinded values from remote's single-blinded points
-        // These are: my_secret * remote_blinded_point
-        // This will be sent back to the remote party
+        check_set_size(remote_msg.len())?;
+
         let double_blinded_to_send: Vec<CompressedRistretto> = remote_msg
             .blinded_points
             .iter()
@@ -129,145 +143,138 @@ impl PsiProtocol<PreparedState> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        // Create double-blinded state with hash_order
         let double_blinded_state = DoubleBlindedState::new(
-            *self.state.secret_scalar(),
-            self.state.blinded_map().clone(),
-            self.state.blinded_to_hash().clone(),
             double_blinded_to_send.clone(),
             self.state.hash_order().to_vec(),
         );
-
-        // Create the message to send back to remote (contains double-blinded of remote's points)
         let message = DoubleBlindedPointsMessage::new(double_blinded_to_send);
 
-        Ok((PsiProtocol { state: double_blinded_state }, message))
+        Ok((
+            PsiProtocol {
+                state: double_blinded_state,
+            },
+            message,
+        ))
     }
 }
 
 impl PsiProtocol<DoubleBlindedState> {
-    /// Finalize the protocol by computing the intersection from double-blinded points.
+    /// Compute the intersection from the peer's double-blinded points.
     ///
-    /// This consumes the `PsiProtocol<DoubleBlindedState>` and returns:
-    /// - `PsiProtocol<FinalState>` - the final state (cannot compute again)
-    /// - `PsiResult` - the intersection results
-    ///
-    /// # Arguments
-    /// * `remote_msg` - The double-blinded points message received from the remote party
-    ///
-    /// # Returns
-    /// A tuple of (PsiProtocol<FinalState>, PsiResult)
+    /// `remote_msg` must contain exactly one point per item this party sent
+    /// in the first message, in that same order.
     ///
     /// # Errors
-    /// Returns `PsiError::InvalidBlindedPoints` if remote's points cannot be processed
+    ///
+    /// Returns [`PsiError::LengthMismatch`] if the message length does not
+    /// equal the local set size.
     ///
     /// # Example
-    /// ```ignore
-    /// let alice = PsiProtocol::new(&items)?;
+    ///
+    /// ```
+    /// use psi_protocol::PsiProtocol;
+    ///
+    /// let alice = PsiProtocol::new(&[b"apple".to_vec(), b"banana".to_vec()])?;
+    /// let bob = PsiProtocol::new(&[b"banana".to_vec(), b"cherry".to_vec()])?;
+    ///
     /// let alice_msg = alice.message();
-    /// let bob_msg = receive_from_remote();
+    /// let bob_msg = bob.message();
     ///
-    /// let (alice_intermediate, alice_double_msg) = alice.compute(bob_msg)?;
-    /// let (bob_intermediate, bob_double_msg) = bob.compute(alice_msg)?;
+    /// let (alice_mid, alice_double) = alice.compute(bob_msg)?;
+    /// let (bob_mid, bob_double) = bob.compute(alice_msg)?;
     ///
-    /// // Exchange double-blinded messages
-    /// let (_alice_final, alice_result) = alice_intermediate.finalize(bob_double_msg)?;
-    /// let (_bob_final, bob_result) = bob_intermediate.finalize(alice_double_msg)?;
+    /// let alice_result = alice_mid.finalize(bob_double)?;
+    /// let bob_result = bob_mid.finalize(alice_double)?;
+    /// assert_eq!(alice_result.len(), 1);
+    /// assert_eq!(bob_result.len(), 1);
     /// # Ok::<(), psi_protocol::PsiError>(())
     /// ```
-    pub fn finalize(
-        self,
-        remote_msg: DoubleBlindedPointsMessage,
-    ) -> Result<(PsiProtocol<FinalState>, PsiResult)> {
-        // Build a set of double-blinded points we computed from remote's single-blinded points
-        // These are: a*(b*K) for each of Bob's items (where K is Bob's hash)
-        let computed_double_blinded_set: std::collections::HashSet<CompressedRistretto> =
-            self.state.double_blinded_from_remote().iter().cloned().collect();
+    pub fn finalize(self, remote_msg: DoubleBlindedPointsMessage) -> Result<PsiResult> {
+        let expected = self.state.hash_order().len();
+        let actual = remote_msg.double_blinded_points.len();
+        if actual != expected {
+            return Err(PsiError::LengthMismatch { expected, actual });
+        }
 
-        // The received double-blinded points are: b*(a*H) for each of our items (in order)
-        // For each received point at index i, check if it matches any of our computed points
+        let computed_double_blinded_set: std::collections::HashSet<CompressedRistretto> = self
+            .state
+            .double_blinded_from_remote()
+            .iter()
+            .cloned()
+            .collect();
+
         let mut intersection_hashes = Vec::new();
         let mut double_blinded_map = HashMap::new();
 
         for (index, remote_double_blinded) in remote_msg.double_blinded_points.iter().enumerate() {
             if computed_double_blinded_set.contains(remote_double_blinded) {
-                // Found a match! This means a*(b*K) = b*(a*Hi) for some K, so Hi = K (common item)
-                // The hash at this index is in the intersection
-                if let Some(&hash) = self.state.hash_order().get(index) {
-                    intersection_hashes.push(hash);
-                    double_blinded_map.insert(hash, *remote_double_blinded);
-                }
+                let hash = self.state.hash_order()[index];
+                intersection_hashes.push(hash);
+                double_blinded_map.insert(hash, *remote_double_blinded);
             }
         }
 
-        // Create final state (secret is dropped)
-        let final_state = FinalState::new(double_blinded_map.clone());
-        let result = PsiResult::new(intersection_hashes, double_blinded_map);
-
-        Ok((PsiProtocol { state: final_state }, result))
-    }
-}
-
-impl PsiProtocol<FinalState> {
-    /// Get the double-blinded mapping from the final state.
-    ///
-    /// This is useful for verification or debugging purposes.
-    ///
-    /// # Returns
-    /// A reference to the HashMap mapping intersection hashes to double-blinded points
-    #[cfg(test)]
-    pub fn double_blinded_map(&self) -> &HashMap<[u8; 32], CompressedRistretto> {
-        self.state.double_blinded_map()
+        Ok(PsiResult::new(intersection_hashes, double_blinded_map))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::messages::DoubleBlindedPointsMessage;
+
+    #[test]
+    fn test_check_set_size() {
+        assert!(check_set_size(0).is_ok());
+        assert!(check_set_size(MAX_ITEMS).is_ok());
+        assert_eq!(
+            check_set_size(MAX_ITEMS + 1),
+            Err(PsiError::SetTooLarge {
+                size: MAX_ITEMS + 1,
+                max: MAX_ITEMS,
+            })
+        );
+    }
 
     #[test]
     fn test_psi_protocol_new_empty() {
-        let result = PsiProtocol::new(&[]);
-        assert!(matches!(result, Err(PsiError::EmptyInput)));
+        let proto = PsiProtocol::new(&[]).unwrap();
+        assert_eq!(proto.message().len(), 0);
     }
 
     #[test]
     fn test_psi_protocol_new_single_item() {
         let items = vec![b"test".to_vec()];
-        let result = PsiProtocol::new(&items);
-        assert!(result.is_ok());
-        let proto = result.unwrap();
-        let msg = proto.message();
-        assert_eq!(msg.len(), 1);
+        let proto = PsiProtocol::new(&items).unwrap();
+        assert_eq!(proto.message().len(), 1);
     }
 
     #[test]
     fn test_psi_protocol_new_multiple_items() {
-        let items = vec![
-            b"apple".to_vec(),
-            b"banana".to_vec(),
-            b"cherry".to_vec(),
-        ];
-        let result = PsiProtocol::new(&items);
-        assert!(result.is_ok());
-        let proto = result.unwrap();
-        let msg = proto.message();
-        assert_eq!(msg.len(), 3);
+        let items = vec![b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()];
+        let proto = PsiProtocol::new(&items).unwrap();
+        assert_eq!(proto.message().len(), 3);
+    }
+
+    #[test]
+    fn test_psi_protocol_duplicate_items() {
+        let proto = PsiProtocol::new(&[b"apple".to_vec(), b"apple".to_vec()]).unwrap();
+        assert_eq!(proto.message().len(), 1);
     }
 
     #[test]
     fn test_psi_protocol_compute_no_intersection() {
-        let alice = PsiProtocol::new(&vec![b"apple".to_vec()]).unwrap();
-        let bob = PsiProtocol::new(&vec![b"banana".to_vec()]).unwrap();
+        let alice = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
+        let bob = PsiProtocol::new(&[b"banana".to_vec()]).unwrap();
 
         let alice_msg = alice.message();
         let bob_msg = bob.message();
 
-        let (alice_intermediate, alice_double_msg) = alice.compute(bob_msg).unwrap();
-        let (bob_intermediate, bob_double_msg) = bob.compute(alice_msg).unwrap();
+        let (alice_mid, alice_double) = alice.compute(bob_msg).unwrap();
+        let (bob_mid, bob_double) = bob.compute(alice_msg).unwrap();
 
-        let (_alice_final, alice_result) = alice_intermediate.finalize(bob_double_msg).unwrap();
-        let (_bob_final, bob_result) = bob_intermediate.finalize(alice_double_msg).unwrap();
+        let alice_result = alice_mid.finalize(bob_double).unwrap();
+        let bob_result = bob_mid.finalize(alice_double).unwrap();
 
         assert_eq!(alice_result.len(), 0);
         assert_eq!(bob_result.len(), 0);
@@ -275,17 +282,17 @@ mod tests {
 
     #[test]
     fn test_psi_protocol_compute_with_intersection() {
-        let alice = PsiProtocol::new(&vec![b"apple".to_vec()]).unwrap();
-        let bob = PsiProtocol::new(&vec![b"apple".to_vec()]).unwrap();
+        let alice = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
+        let bob = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
 
         let alice_msg = alice.message();
         let bob_msg = bob.message();
 
-        let (alice_intermediate, alice_double_msg) = alice.compute(bob_msg).unwrap();
-        let (bob_intermediate, bob_double_msg) = bob.compute(alice_msg).unwrap();
+        let (alice_mid, alice_double) = alice.compute(bob_msg).unwrap();
+        let (bob_mid, bob_double) = bob.compute(alice_msg).unwrap();
 
-        let (_alice_final, alice_result) = alice_intermediate.finalize(bob_double_msg).unwrap();
-        let (_bob_final, bob_result) = bob_intermediate.finalize(alice_double_msg).unwrap();
+        let alice_result = alice_mid.finalize(bob_double).unwrap();
+        let bob_result = bob_mid.finalize(alice_double).unwrap();
 
         assert_eq!(alice_result.len(), 1);
         assert_eq!(bob_result.len(), 1);
@@ -297,26 +304,19 @@ mod tests {
 
     #[test]
     fn test_psi_protocol_compute_symmetric() {
-        let alice = PsiProtocol::new(&vec![
-            b"apple".to_vec(),
-            b"banana".to_vec(),
-            b"cherry".to_vec(),
-        ]).unwrap();
-        let bob = PsiProtocol::new(&vec![
-            b"banana".to_vec(),
-            b"date".to_vec(),
-        ]).unwrap();
+        let alice =
+            PsiProtocol::new(&[b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()]).unwrap();
+        let bob = PsiProtocol::new(&[b"banana".to_vec(), b"date".to_vec()]).unwrap();
 
         let alice_msg = alice.message();
         let bob_msg = bob.message();
 
-        let (alice_intermediate, alice_double_msg) = alice.compute(bob_msg).unwrap();
-        let (bob_intermediate, bob_double_msg) = bob.compute(alice_msg).unwrap();
+        let (alice_mid, alice_double) = alice.compute(bob_msg).unwrap();
+        let (bob_mid, bob_double) = bob.compute(alice_msg).unwrap();
 
-        let (_alice_final, alice_result) = alice_intermediate.finalize(bob_double_msg).unwrap();
-        let (_bob_final, bob_result) = bob_intermediate.finalize(alice_double_msg).unwrap();
+        let alice_result = alice_mid.finalize(bob_double).unwrap();
+        let bob_result = bob_mid.finalize(alice_double).unwrap();
 
-        // Both should find the same intersection (banana)
         assert_eq!(alice_result.len(), 1);
         assert_eq!(bob_result.len(), 1);
         assert_eq!(
@@ -326,23 +326,113 @@ mod tests {
     }
 
     #[test]
-    fn test_psi_protocol_compute_drops_secret() {
-        // This is a compile-time test - FinalState should not have access to secret
-        let alice = PsiProtocol::new(&vec![b"test".to_vec()]).unwrap();
-        let bob = PsiProtocol::new(&vec![b"test".to_vec()]).unwrap();
+    fn test_psi_protocol_empty_vs_nonempty() {
+        let alice = PsiProtocol::new(&[]).unwrap();
+        let bob = PsiProtocol::new(&[b"banana".to_vec()]).unwrap();
 
         let alice_msg = alice.message();
         let bob_msg = bob.message();
 
-        let (alice_intermediate, alice_double_msg) = alice.compute(bob_msg).unwrap();
-        let (bob_intermediate, bob_double_msg) = bob.compute(alice_msg).unwrap();
+        let (alice_mid, alice_double) = alice.compute(bob_msg).unwrap();
+        let (bob_mid, bob_double) = bob.compute(alice_msg).unwrap();
 
-        let (alice_final, _alice_result) = alice_intermediate.finalize(bob_double_msg).unwrap();
-        let _ = bob_intermediate;
+        let alice_result = alice_mid.finalize(bob_double).unwrap();
+        let bob_result = bob_mid.finalize(alice_double).unwrap();
 
-        // The following should NOT compile - secret is not accessible in FinalState
-        // let _secret = alice_final.state.secret; // This would be a compile error
-        // But we can access the double-blinded map:
-        let _map = alice_final.double_blinded_map();
+        assert_eq!(alice_result.len(), 0);
+        assert_eq!(bob_result.len(), 0);
+    }
+
+    #[test]
+    fn test_psi_protocol_unequal_sizes() {
+        let shared = b"shared".to_vec();
+        let alice = PsiProtocol::new(&[
+            b"a1".to_vec(),
+            b"a2".to_vec(),
+            shared.clone(),
+            b"a3".to_vec(),
+            b"a4".to_vec(),
+        ])
+        .unwrap();
+        let bob = PsiProtocol::new(&[shared, b"b1".to_vec()]).unwrap();
+
+        let alice_msg = alice.message();
+        let bob_msg = bob.message();
+
+        let (alice_mid, alice_double) = alice.compute(bob_msg).unwrap();
+        let (bob_mid, bob_double) = bob.compute(alice_msg).unwrap();
+
+        let alice_result = alice_mid.finalize(bob_double).unwrap();
+        let bob_result = bob_mid.finalize(alice_double).unwrap();
+
+        assert_eq!(alice_result.len(), 1);
+        assert_eq!(bob_result.len(), 1);
+        assert_eq!(
+            alice_result.intersection_hashes,
+            bob_result.intersection_hashes
+        );
+    }
+
+    #[test]
+    fn test_finalize_length_too_short() {
+        let alice = PsiProtocol::new(&[b"apple".to_vec(), b"banana".to_vec()]).unwrap();
+        let bob = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
+
+        let bob_msg = bob.message();
+        let (alice_mid, _) = alice.compute(bob_msg).unwrap();
+
+        let err = alice_mid
+            .finalize(DoubleBlindedPointsMessage::new(vec![]))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PsiError::LengthMismatch {
+                expected: 2,
+                actual: 0
+            }
+        );
+    }
+
+    #[test]
+    fn test_finalize_length_too_long() {
+        let alice = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
+        let bob = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
+
+        let alice_msg = alice.message();
+        let bob_msg = bob.message();
+        let (alice_mid, alice_double) = alice.compute(bob_msg).unwrap();
+        let (_, bob_double) = bob.compute(alice_msg).unwrap();
+
+        let mut too_long = bob_double.double_blinded_points;
+        too_long.push(alice_double.double_blinded_points[0]);
+
+        let err = alice_mid
+            .finalize(DoubleBlindedPointsMessage::new(too_long))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PsiError::LengthMismatch {
+                expected: 1,
+                actual: 2
+            }
+        );
+    }
+
+    #[test]
+    fn test_compute_invalid_point() {
+        let alice = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
+        let bad = BlindedPointsMessage::new(vec![CompressedRistretto([0xffu8; 32])]);
+        let err = alice.compute(bad).unwrap_err();
+        assert!(matches!(err, PsiError::CryptoError(_)));
+    }
+
+    #[test]
+    fn test_prepared_debug_does_not_include_secret() {
+        let alice = PsiProtocol::new(&[b"apple".to_vec()]).unwrap();
+        let rendered = format!("{alice:?}");
+        assert!(rendered.contains("PsiProtocol"));
+        assert!(rendered.contains("PreparedState"));
+        // Redacted Debug has item count, not a 64-hex-looking scalar dump.
+        assert!(!rendered.contains("secret"));
     }
 }

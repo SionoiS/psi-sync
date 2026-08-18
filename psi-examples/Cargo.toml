@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "in_memory"
@@ -11,9 +12,4 @@ path = "src/bin/in_memory.rs"
 
 [dependencies]
 psi-protocol = { path = "../psi-protocol" }
-curve25519-dalek.workspace = true
-sha2.workspace = true
 rand.workspace = true
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-hex = "0.4"

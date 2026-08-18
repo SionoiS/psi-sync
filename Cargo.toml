@@ -7,9 +7,13 @@ version = "0.2.0"
 edition = "2021"
 authors = ["psi-sync contributors"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/SionoiS/psi-sync"
+readme = "README.md"
+description = "Two-party ECDH private set intersection on Ristretto"
 
 [workspace.dependencies]
 curve25519-dalek = { version = "4", features = ["rand_core", "digest"] }
 sha2 = "0.10"
 rand = "0.8"
 thiserror = "1.0"
+zeroize = "1"
