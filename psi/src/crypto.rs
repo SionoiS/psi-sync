@@ -10,7 +10,8 @@ use std::collections::HashMap;
 /// Domain-separation tag mixed into hash-to-curve (not into [`hash_bytes`]).
 pub(crate) const H2C_DST: &[u8] = b"psi-sync/v1";
 
-/// Hash a byte array to a 32-byte identifier (first 32 bytes of SHA-512).
+/// Hash a byte array to a 32-byte identifier (first 32 bytes of SHA-512,
+/// not SHA-512/256).
 ///
 /// Intersection results report these identifiers, not the original items.
 /// Callers map results back by hashing their local items with this function.

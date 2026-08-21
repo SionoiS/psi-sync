@@ -261,6 +261,11 @@ where
         Ok(())
     }
 
+    /// Remove `(tag, item)`. Returns `true` if it was present.
+    pub fn remove(&mut self, tag: &K, item: &T) -> bool {
+        self.tree.remove(tag, item)
+    }
+
     /// Number of stored points.
     pub fn len(&self) -> usize {
         self.tree.len()
@@ -317,17 +322,7 @@ impl TaggedStore<SyncId, [u8; 32]> {
             timestamp,
             hash: EMPTY_HASH,
         };
-        let before = self.tree.len();
-        let mut kept = Vec::new();
-        for (tag, items) in self.tree.flatten_all() {
-            let rest: Vec<_> = items.into_iter().filter(|id| *id >= bound).collect();
-            if !rest.is_empty() {
-                kept.push((tag, rest));
-            }
-        }
-        self.tree.clear();
-        self.tree.rebuild_from(kept);
-        before - self.tree.len()
+        self.tree.remove_before(&bound)
     }
 }
 
@@ -804,6 +799,24 @@ mod tests {
     }
 
     #[test]
+    fn remove_present_and_absent() {
+        let mut s = store(&[(1, 10), (1, 20), (2, 10)]);
+        assert!(s.remove(&1, &Key(10)));
+        assert!(!s.remove(&1, &Key(10)));
+        assert_eq!(s.len(), 2);
+        let all = RectBounds::all_tags(window()).unwrap();
+        assert_eq!(s.count(all.clone()), 2);
+        assert_eq!(
+            s.fingerprint(all.clone()),
+            naive_fp(&[(1, 20), (2, 10)], &all)
+        );
+        assert!(s.remove(&2, &Key(10)));
+        assert_eq!(s.len(), 1);
+        let t2 = RectBounds::topic(2, window()).unwrap();
+        assert_eq!(s.count(t2), 0);
+    }
+
+    #[test]
     fn prune_before_drops_old_sync_ids() {
         let mut s = TaggedStore::<SyncId>::new(ReconcileConfig::default()).unwrap();
         let tag = [1u8; 32];
@@ -812,6 +825,46 @@ mod tests {
         s.insert([2u8; 32], sid(3, 3)).unwrap();
         assert_eq!(s.prune_before(2), 1);
         assert_eq!(s.len(), 2);
+        let all = RectBounds::all_tags(RangeBounds::window(0, 10).unwrap()).unwrap();
+        assert_eq!(s.count(all), 2);
+    }
+
+    #[test]
+    fn prune_before_drops_empty_tags() {
+        let mut s = TaggedStore::<SyncId>::new(ReconcileConfig::default()).unwrap();
+        s.insert([1u8; 32], sid(1, 1)).unwrap();
+        s.insert([2u8; 32], sid(3, 3)).unwrap();
+        s.insert([3u8; 32], sid(1, 2)).unwrap();
+        assert_eq!(s.prune_before(2), 2);
+        assert_eq!(s.len(), 1);
+        let t1 = RectBounds::topic([1u8; 32], RangeBounds::window(0, 10).unwrap()).unwrap();
+        let t2 = RectBounds::topic([2u8; 32], RangeBounds::window(0, 10).unwrap()).unwrap();
+        assert_eq!(s.count(t1), 0);
+        assert_eq!(s.count(t2), 1);
+        assert_eq!(s.prune_before(1), 0);
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn prune_before_many_tags_preserves_newer() {
+        let mut s = TaggedStore::<SyncId>::new(ReconcileConfig::default()).unwrap();
+        for t in 0..16u8 {
+            let mut tag = [0u8; 32];
+            tag[0] = t;
+            s.insert(tag, sid(1, t)).unwrap();
+            s.insert(tag, sid(5, t)).unwrap();
+        }
+        assert_eq!(s.prune_before(3), 16);
+        assert_eq!(s.len(), 16);
+        let window = RangeBounds::window(0, 10).unwrap();
+        let all = RectBounds::all_tags(window).unwrap();
+        assert_eq!(s.count(all), 16);
+        for t in 0..16u8 {
+            let mut tag = [0u8; 32];
+            tag[0] = t;
+            let b = RectBounds::topic(tag, RangeBounds::window(0, 10).unwrap()).unwrap();
+            assert_eq!(s.count(b), 1);
+        }
     }
 
     #[test]

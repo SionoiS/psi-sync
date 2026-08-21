@@ -1,8 +1,9 @@
 //! # Private Set Intersection (PSI) Protocol
 //!
 //! Two-party ECDH private set intersection on the Ristretto group
-//! (`curve25519-dalek`). Honest peers learn the SHA-512/256 identifiers of
-//! items they both hold, and nothing about the rest of each other's sets.
+//! (`curve25519-dalek`). Honest peers learn the identifiers of items they
+//! both hold (first 32 bytes of SHA-512, not SHA-512/256), and nothing
+//! about the rest of each other's sets.
 //!
 //! ## Features
 //!

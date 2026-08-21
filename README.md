@@ -15,7 +15,7 @@ They solve different problems. PSI hides exclusive items and returns only the in
 
 ## `psi` (PSI)
 
-Each party holds a private set of byte strings. After two message exchanges they both learn the SHA-512/256 identifiers of the items they share, and nothing else about the other set.
+Each party holds a private set of byte strings. After two message exchanges they both learn the identifiers of the items they share (first 32 bytes of SHA-512, **not** SHA-512/256), and nothing else about the other set.
 
 The protocol is ECDH-PSI on the [Ristretto](https://ristretto.group/) group (`curve25519-dalek` 4). Transport- and codec-agnostic.
 
@@ -69,16 +69,16 @@ Range-based set reconciliation over any totally ordered item type (`ReconcileIte
 
 The local set is a **monoid tree** (Meyer, Algorithm 1): each AVL node stores the XOR fingerprint and size of its subtree, so a range fingerprint is a path walk rather than a scan. `TaggedStore` nests that tree into a 2-D range tree (tag × item). Query a single topic with `RectBounds::topic` — never a hash **interval** of topics, which would include exclusive subscriptions whose hashes fall between two shared ones. `topic-sync` still keeps per-topic stores and PSI for that reason.
 
-This crate implements **reconciliation only**, not a transfer protocol and not Waku message hashing (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself. `codec`, `RangeBounds::window`, and `prune_before` are `SyncId`-specific.
+This crate implements **reconciliation only**, not a transfer protocol and not Waku message hashing (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself. `codec`, `RangeBounds::window`, and `prune_before` are `SyncId`-specific. The store is frozen for the life of a `Reconcile` session: do not insert or remove while it is running.
 
 ### Flow
 
 1. `Reconcile::initiate(&store, bounds)` sends one XOR **fingerprint** over the window.
 2. Matching fingerprints become **Skip**. Small differing ranges become an **ItemSet**. Large ones are split (default 8-way time partition; hash-space fallback when timestamps collide).
-3. Item sets are merge-walked. The first set has `reconciled = false`; the reply has `true`.
+3. Item sets are merge-walked. The first set lists local items (`reconciled = false`); the reply has exclusive `elements` + `needed` and `reconciled = true`.
 4. The side that produces an empty message returns `ReconcileStep::Done { farewell: Some(empty) }`. The peer `step`s that closer and finishes.
 
-`codec` is optional and not used by the session. Cluster/shard bytes are written as zero and ignored on decode.
+`codec` is optional and not used by the session. It encodes the session item-set shape (`elements` then `needed`) and is **not** Nwaku's ItemSet layout. Cluster/shard bytes are written as zero and ignored on decode.
 
 ### Usage
 
@@ -116,7 +116,7 @@ assert_eq!(store.count(bounds), 1);
 
 ### Reconciliation threat model
 
-Peers are trusted to follow the protocol. Fingerprints leak a digest of items in a range (XOR of hashes for `SyncId`). Item sets leak every identifier in a differing range. A peer can Skip or invent IDs. Prefer an authenticated channel.
+Peers are trusted to follow the protocol. Fingerprints leak a digest of items in a range (XOR of hashes for `SyncId`). Equal XOR fingerprints are treated as equal ranges; a collision can hide a real difference. Item sets leak every identifier in a differing range. A peer can Skip or invent IDs. Prefer an authenticated channel.
 
 ---
 
@@ -127,7 +127,7 @@ Two parties each hold a map of **topics** (opaque byte strings) to per-topic `Re
 1. Which topics they share (PSI). Exclusive topics stay hidden.
 2. For each shared topic, which `SyncId`s to send and receive (LIP-182).
 
-Payload transfer is still the caller's job. The time window is the same for every shared topic. Shared topics reconcile in parallel; `PsiDone.opening` and later `Reconcile` batches list frames in lexicographic PSI-hash order. Transport- and codec-agnostic.
+Payload transfer is still the caller's job. The time window is the same for every shared topic. Shared topics reconcile in parallel; `PsiDone.opening` and later `Reconcile` batches list frames in lexicographic PSI-hash order. Transport- and codec-agnostic. Stores are frozen for the life of a `TopicSync` session: do not insert or remove while it is running.
 
 ### Flow
 
@@ -159,7 +159,7 @@ let _ = (alice_sess, first, bob_sess);
 
 ### Topic-sync threat model
 
-Union of the two sub-protocols. Honest-but-curious peers; authenticated, confidential, **order-preserving** channel. Topic-set sizes leak. Shared topic **hashes** appear on reconcile frames; raw exclusive topic bytes do not. Message IDs in a differing range leak. A peer can lie about its topic set or Skip/invent IDs.
+Union of the two sub-protocols. Honest-but-curious peers; authenticated, confidential, **order-preserving** channel. Topic-set sizes leak. Shared topic **hashes** appear on reconcile frames; raw exclusive topic bytes do not. Message IDs in a differing range leak. XOR fingerprints can collide and hide a difference. A peer can lie about its topic set or Skip/invent IDs.
 
 ---
 

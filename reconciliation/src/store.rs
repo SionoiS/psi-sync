@@ -43,6 +43,11 @@ impl<T: ReconcileItem> ReconcileStore<T> {
         Ok(())
     }
 
+    /// Remove `id`. Returns `true` if it was present.
+    pub fn remove(&mut self, id: &T) -> bool {
+        self.items.remove(id)
+    }
+
     /// Number of stored items.
     pub fn len(&self) -> usize {
         self.items.len()
@@ -183,6 +188,28 @@ mod tests {
             .collect();
         assert_eq!(v[0], sid(1, 1));
         assert_eq!(v[1], sid(2, 1));
+    }
+
+    #[test]
+    fn remove_present_and_absent() {
+        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        s.insert(sid(1, 1)).unwrap();
+        assert!(s.remove(&sid(1, 1)));
+        assert!(!s.remove(&sid(1, 1)));
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn remove_frees_max_items_slot() {
+        let cfg = ReconcileConfig {
+            max_items: 1,
+            ..Default::default()
+        };
+        let mut s = ReconcileStore::new(cfg).unwrap();
+        s.insert(sid(1, 1)).unwrap();
+        assert!(s.remove(&sid(1, 1)));
+        s.insert(sid(2, 2)).unwrap();
+        assert_eq!(s.len(), 1);
     }
 
     #[test]

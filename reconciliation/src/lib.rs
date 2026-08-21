@@ -13,7 +13,8 @@
 //! [lip]: https://lip.logos.co/messaging/core/raw/sync.html
 //!
 //! The session is type-state: only [`Reconcile<Running>`] can [`Reconcile::step`].
-//! `step` consumes `self`, like `psi::PsiProtocol::compute`.
+//! `step` consumes `self`, like `psi::PsiProtocol::compute`. The store is
+//! frozen for the session: do not insert or remove until it ends.
 //!
 //! ## Example
 //!
@@ -118,15 +119,17 @@
 //! ## Threat model
 //!
 //! Peers are trusted to follow the protocol. Fingerprints leak a digest of
-//! items in a range (XOR of hashes for [`SyncId`]). Item sets leak every
-//! identifier in a differing range.
+//! items in a range (XOR of hashes for [`SyncId`]). Equal XOR fingerprints
+//! are treated as equal ranges; a collision can hide a real difference.
+//! Item sets leak every identifier in a differing range.
 //! A peer can Skip or invent IDs. Use an authenticated channel.
 //!
 //! ## Codec
 //!
 //! [`codec::encode`] / [`codec::decode`] are optional. The session never
 //! calls them. Cluster/shard headers are written as zero and ignored.
-//! Item sets encode `needed` after `elements`; this is not Nwaku's layout.
+//! Session replies use exclusive `elements` plus `needed`; the codec encodes
+//! that shape and is not Nwaku's ItemSet layout.
 
 pub use bounds::RangeBounds;
 pub use config::ReconcileConfig;

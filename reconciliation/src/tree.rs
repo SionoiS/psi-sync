@@ -59,7 +59,6 @@ impl<T: ReconcileItem> MonoidTree<T> {
     }
 
     /// Delete `value`. Returns `true` if it was present.
-    #[allow(dead_code)]
     pub(crate) fn remove(&mut self, value: &T) -> bool {
         let mut removed = false;
         self.root = remove_node(self.root.take(), value, &mut removed);

@@ -8,7 +8,8 @@
 //!
 //! Exclusive topics never appear on the reconciliation wire. The crate does
 //! not transfer payloads, does not talk to the network, and does not mutate
-//! stores with `to_recv` IDs.
+//! stores with `to_recv` IDs. Stores are frozen for the session: do not
+//! insert or remove until it ends.
 //!
 //! ## Protocol
 //!
@@ -98,8 +99,9 @@
 //! confidential, and order-preserving**. Topic-set sizes leak from PSI
 //! message lengths. Shared topic hashes appear on reconcile frames.
 //! Exclusive topic bytes never leave this crate. Message identifiers in a
-//! differing range leak (same as [`reconciliation`]). A malicious peer can
-//! lie about its set or stall. There are no proofs of correct computation.
+//! differing range leak (same as [`reconciliation`]). XOR fingerprints can
+//! collide and hide a difference. A malicious peer can lie about its set
+//! or stall. There are no proofs of correct computation.
 
 pub use error::{Result, TopicSyncError};
 pub use message::{ReconcileFrame, SyncMessage};

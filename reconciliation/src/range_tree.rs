@@ -156,6 +156,31 @@ where
         true
     }
 
+    /// Delete `(tag, item)`. Returns `true` if it was present.
+    pub(crate) fn remove(&mut self, tag: &K, item: &T) -> bool {
+        let yp = YPoint {
+            item: item.clone(),
+            tag: Some(tag.clone()),
+        };
+        let mut removed = false;
+        self.root = remove_outer(self.root.take(), tag, &yp, &mut removed);
+        if removed && self.height() > max_height(self.n_tags()) {
+            self.rebuild();
+        }
+        removed
+    }
+
+    /// Drop every item strictly less than `bound`. Returns the number removed.
+    pub(crate) fn remove_before(&mut self, bound: &T) -> usize {
+        let before = self.len();
+        let yp = item_bound(bound);
+        self.root = prune_outer(self.root.take(), &yp);
+        if self.height() > max_height(self.n_tags()) {
+            self.rebuild();
+        }
+        before - self.len()
+    }
+
     fn contains_point(&self, tag: &K, yp: &YPoint<K, T>) -> bool {
         let mut t = self.root.as_deref();
         while let Some(n) = t {
@@ -204,11 +229,6 @@ where
         let mut out = Vec::new();
         collect_items(self.root.as_deref(), start, end, &ylo, &yhi, &mut out);
         out
-    }
-
-    /// Drop every stored point. Used by rebuild helpers and prune.
-    pub(crate) fn clear(&mut self) {
-        self.root = None;
     }
 
     pub(crate) fn rebuild_from(&mut self, parts: Vec<(K, Vec<T>)>) {
@@ -285,6 +305,94 @@ where
             n.inner.insert(yp);
             pull_up_outer(&mut n);
             Some(n)
+        }
+    }
+}
+
+fn remove_outer<K, T>(
+    node: Option<Box<Outer<K, T>>>,
+    tag: &K,
+    yp: &YPoint<K, T>,
+    removed: &mut bool,
+) -> Option<Box<Outer<K, T>>>
+where
+    K: ReconcileItem<Fingerprint = T::Fingerprint>,
+    T: ReconcileItem,
+{
+    let mut n = node?;
+    match tag.cmp(&n.tag) {
+        std::cmp::Ordering::Equal => {
+            *removed = n.local.remove(yp);
+            if *removed {
+                n.inner.remove(yp);
+            }
+            if n.local.is_empty() {
+                return join_outer(n.left.take(), n.right.take());
+            }
+            if *removed {
+                pull_up_outer(&mut n);
+            }
+            Some(n)
+        }
+        std::cmp::Ordering::Less => {
+            n.left = remove_outer(n.left.take(), tag, yp, removed);
+            if *removed {
+                n.inner.remove(yp);
+                pull_up_outer(&mut n);
+            }
+            Some(n)
+        }
+        std::cmp::Ordering::Greater => {
+            n.right = remove_outer(n.right.take(), tag, yp, removed);
+            if *removed {
+                n.inner.remove(yp);
+                pull_up_outer(&mut n);
+            }
+            Some(n)
+        }
+    }
+}
+
+fn prune_outer<K, T>(
+    node: Option<Box<Outer<K, T>>>,
+    bound: &YPoint<K, T>,
+) -> Option<Box<Outer<K, T>>>
+where
+    K: ReconcileItem<Fingerprint = T::Fingerprint>,
+    T: ReconcileItem,
+{
+    let mut n = node?;
+    match n.inner.iter().next() {
+        None => return join_outer(n.left.take(), n.right.take()),
+        Some(yp) if yp >= bound => return Some(n),
+        Some(_) => {}
+    }
+    n.left = prune_outer(n.left.take(), bound);
+    n.right = prune_outer(n.right.take(), bound);
+    n.local.remove_before(bound);
+    n.inner.remove_before(bound);
+    if n.local.is_empty() {
+        return join_outer(n.left.take(), n.right.take());
+    }
+    pull_up_outer(&mut n);
+    Some(n)
+}
+
+fn join_outer<K, T>(
+    left: Option<Box<Outer<K, T>>>,
+    right: Option<Box<Outer<K, T>>>,
+) -> Option<Box<Outer<K, T>>>
+where
+    K: ReconcileItem<Fingerprint = T::Fingerprint>,
+    T: ReconcileItem,
+{
+    match (left, right) {
+        (None, r) => r,
+        (l, None) => l,
+        (l, r) => {
+            let mut parts = flatten(l);
+            parts.extend(flatten(r));
+            build_balanced(&parts).0
         }
     }
 }
