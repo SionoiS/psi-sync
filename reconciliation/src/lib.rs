@@ -4,7 +4,8 @@
 //! [`ReconcileMessage`]s until they agree on the symmetric difference.
 //! The set requirement is a total order; fingerprints test range equality
 //! without listing items. [`SyncId`] is the LIP-182 item type (time then
-//! hash) and the default type parameter.
+//! hash) and the default type parameter. [`ReconcileStore`] holds items in a
+//! monoid tree; [`TaggedStore`] adds a tag axis (topic × item).
 //!
 //! This is **not** private set intersection — see the `psi` crate. There
 //! is no transfer protocol.
@@ -91,6 +92,7 @@
 //!     type Fingerprint = u64;
 //!     fn empty_fingerprint() -> u64 { 0 }
 //!     fn accumulate(fp: &mut u64, item: &Self) { *fp ^= item.0; }
+//!     fn combine(a: &u64, b: &u64) -> u64 { a ^ b }
 //! }
 //!
 //! let mut alice = ReconcileStore::new(Default::default())?;
@@ -132,8 +134,10 @@ pub use id::{SyncId, EMPTY_HASH, FULL_HASH};
 pub use item::ReconcileItem;
 pub use range::{ItemSet, Range, ReconcileMessage};
 pub use session::{Reconcile, ReconcileResult, ReconcileStep};
+pub use source::{ReconcileSource, SessionBounds};
 pub use state::{ReconcileState, Running};
 pub use store::ReconcileStore;
+pub use tagged::{RectBounds, TagRange, Tagged, TaggedStore};
 
 pub mod codec;
 
@@ -146,9 +150,13 @@ mod item;
 mod partition;
 mod process;
 mod range;
+mod range_tree;
 mod session;
+mod source;
 mod state;
 mod store;
+mod tagged;
+mod tree;
 
 #[cfg(test)]
 mod integration_tests {

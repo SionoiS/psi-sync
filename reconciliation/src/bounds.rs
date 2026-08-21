@@ -2,6 +2,7 @@
 
 use crate::error::{ReconcileError, Result};
 use crate::id::SyncId;
+use crate::source::SessionBounds;
 
 /// A half-open interval: `a` inclusive, `b` exclusive.
 ///
@@ -29,6 +30,17 @@ impl<T: Ord> RangeBounds<T> {
     /// True if `a <= id < b`.
     pub fn contains(&self, id: &T) -> bool {
         &self.a <= id && id < &self.b
+    }
+}
+
+impl<T: Clone + Ord + std::fmt::Debug> SessionBounds for RangeBounds<T> {
+    fn is_valid(&self) -> bool {
+        self.a < self.b
+    }
+
+    fn merge_skip(&mut self, next: &Self) -> bool {
+        self.b = next.b.clone();
+        true
     }
 }
 

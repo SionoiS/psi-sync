@@ -1,22 +1,21 @@
 //! Per-message processing (LIP-182 reconciliation heuristic).
 
-use crate::bounds::RangeBounds;
 use crate::item::ReconcileItem;
 use crate::range::{merge_skips, ItemSet, Range, ReconcileMessage};
-use crate::store::ReconcileStore;
+use crate::source::ReconcileSource;
 
 /// Result of processing one incoming message.
-pub(crate) struct ProcessOutput<T: ReconcileItem> {
-    pub reply: ReconcileMessage<T>,
+pub(crate) struct ProcessOutput<T: ReconcileItem, B: crate::source::SessionBounds> {
+    pub reply: ReconcileMessage<T, B>,
     pub to_send: Vec<T>,
     pub to_recv: Vec<T>,
 }
 
 /// Process `incoming` against `store`.
-pub(crate) fn process_payload<T: ReconcileItem>(
-    store: &ReconcileStore<T>,
-    incoming: &ReconcileMessage<T>,
-) -> ProcessOutput<T> {
+pub(crate) fn process_payload<Src: ReconcileSource>(
+    store: &Src,
+    incoming: &ReconcileMessage<Src::Item, Src::Bounds>,
+) -> ProcessOutput<Src::Item, Src::Bounds> {
     let mut reply_ranges = Vec::new();
     let mut to_send = Vec::new();
     let mut to_recv = Vec::new();
@@ -71,13 +70,13 @@ pub(crate) fn process_payload<T: ReconcileItem>(
     }
 }
 
-fn process_fingerprint<T: ReconcileItem>(
-    store: &ReconcileStore<T>,
-    bounds: RangeBounds<T>,
-    theirs: T::Fingerprint,
+fn process_fingerprint<Src: ReconcileSource>(
+    store: &Src,
+    bounds: Src::Bounds,
+    theirs: <Src::Item as ReconcileItem>::Fingerprint,
     threshold: usize,
     partitions: usize,
-    out: &mut Vec<Range<T>>,
+    out: &mut Vec<Range<Src::Item, Src::Bounds>>,
 ) {
     let ours = store.fingerprint(bounds.clone());
     if ours == theirs {
@@ -85,24 +84,23 @@ fn process_fingerprint<T: ReconcileItem>(
         return;
     }
 
-    let local = store.slice(bounds.clone());
-    if local.len() <= threshold {
+    if store.count(bounds.clone()) <= threshold {
         out.push(Range::item_set(
-            bounds,
+            bounds.clone(),
             ItemSet {
-                elements: local.to_vec(),
+                elements: store.items(bounds),
                 reconciled: false,
             },
         ));
         return;
     }
 
-    let parts = T::partition(bounds.clone(), local, partitions);
-    if parts.is_empty() {
+    let parts = store.partition(bounds.clone(), partitions);
+    if parts.len() < 2 {
         out.push(Range::item_set(
-            bounds,
+            bounds.clone(),
             ItemSet {
-                elements: local.to_vec(),
+                elements: store.items(bounds),
                 reconciled: false,
             },
         ));
@@ -110,12 +108,11 @@ fn process_fingerprint<T: ReconcileItem>(
     }
 
     for part in parts {
-        let slice = store.slice(part.clone());
-        if slice.len() <= threshold {
+        if store.count(part.clone()) <= threshold {
             out.push(Range::item_set(
-                part,
+                part.clone(),
                 ItemSet {
-                    elements: slice.to_vec(),
+                    elements: store.items(part),
                     reconciled: false,
                 },
             ));
@@ -125,15 +122,15 @@ fn process_fingerprint<T: ReconcileItem>(
     }
 }
 
-fn process_item_set<T: ReconcileItem>(
-    store: &ReconcileStore<T>,
-    bounds: RangeBounds<T>,
-    theirs: &ItemSet<T>,
-    to_send: &mut Vec<T>,
-    to_recv: &mut Vec<T>,
-    out: &mut Vec<Range<T>>,
+fn process_item_set<Src: ReconcileSource>(
+    store: &Src,
+    bounds: Src::Bounds,
+    theirs: &ItemSet<Src::Item>,
+    to_send: &mut Vec<Src::Item>,
+    to_recv: &mut Vec<Src::Item>,
+    out: &mut Vec<Range<Src::Item, Src::Bounds>>,
 ) {
-    let ours = store.slice(bounds.clone());
+    let ours = store.items(bounds.clone());
     let mut i = 0;
     let mut j = 0;
     while i < theirs.elements.len() && j < ours.len() {
@@ -165,7 +162,7 @@ fn process_item_set<T: ReconcileItem>(
         out.push(Range::item_set(
             bounds,
             ItemSet {
-                elements: ours.to_vec(),
+                elements: ours,
                 reconciled: true,
             },
         ));

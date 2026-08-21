@@ -3,6 +3,7 @@
 use crate::bounds::RangeBounds;
 use crate::id::SyncId;
 use crate::item::ReconcileItem;
+use crate::source::SessionBounds;
 
 /// Full listing of items in a range, plus the two-phase handshake flag.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,38 +16,35 @@ pub struct ItemSet<T = SyncId> {
 
 /// One interval in a reconciliation message.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Range<T: ReconcileItem = SyncId> {
+pub enum Range<T: ReconcileItem = SyncId, B: SessionBounds = RangeBounds<T>> {
     /// Already processed; no payload.
-    Skip { bounds: RangeBounds<T> },
+    Skip { bounds: B },
     /// Fingerprint of items in `bounds`.
     Fingerprint {
-        bounds: RangeBounds<T>,
+        bounds: B,
         fingerprint: T::Fingerprint,
     },
     /// Explicit item list for a small range.
-    Items {
-        bounds: RangeBounds<T>,
-        set: ItemSet<T>,
-    },
+    Items { bounds: B, set: ItemSet<T> },
 }
 
-impl<T: ReconcileItem> Range<T> {
-    pub(crate) fn skip(bounds: RangeBounds<T>) -> Self {
+impl<T: ReconcileItem, B: SessionBounds> Range<T, B> {
+    pub(crate) fn skip(bounds: B) -> Self {
         Self::Skip { bounds }
     }
 
-    pub(crate) fn fingerprint(bounds: RangeBounds<T>, fingerprint: T::Fingerprint) -> Self {
+    pub(crate) fn fingerprint(bounds: B, fingerprint: T::Fingerprint) -> Self {
         Self::Fingerprint {
             bounds,
             fingerprint,
         }
     }
 
-    pub(crate) fn item_set(bounds: RangeBounds<T>, set: ItemSet<T>) -> Self {
+    pub(crate) fn item_set(bounds: B, set: ItemSet<T>) -> Self {
         Self::Items { bounds, set }
     }
 
-    pub(crate) fn bounds(&self) -> RangeBounds<T> {
+    pub(crate) fn bounds(&self) -> B {
         match self {
             Self::Skip { bounds }
             | Self::Fingerprint { bounds, .. }
@@ -61,12 +59,12 @@ impl<T: ReconcileItem> Range<T> {
 
 /// One reconciliation message.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct ReconcileMessage<T: ReconcileItem = SyncId> {
+pub struct ReconcileMessage<T: ReconcileItem = SyncId, B: SessionBounds = RangeBounds<T>> {
     /// Ranges in partition order. Empty means the session is closing.
-    pub ranges: Vec<Range<T>>,
+    pub ranges: Vec<Range<T, B>>,
 }
 
-impl<T: ReconcileItem> ReconcileMessage<T> {
+impl<T: ReconcileItem, B: SessionBounds> ReconcileMessage<T, B> {
     /// Empty closer.
     pub fn empty() -> Self {
         Self { ranges: Vec::new() }
@@ -79,13 +77,16 @@ impl<T: ReconcileItem> ReconcileMessage<T> {
 }
 
 /// Merge adjacent Skip ranges into one spanning Skip.
-pub(crate) fn merge_skips<T: ReconcileItem>(ranges: Vec<Range<T>>) -> Vec<Range<T>> {
-    let mut out: Vec<Range<T>> = Vec::with_capacity(ranges.len());
+pub(crate) fn merge_skips<T: ReconcileItem, B: SessionBounds>(
+    ranges: Vec<Range<T, B>>,
+) -> Vec<Range<T, B>> {
+    let mut out: Vec<Range<T, B>> = Vec::with_capacity(ranges.len());
     for r in ranges {
         if let Range::Skip { bounds } = r {
             if let Some(Range::Skip { bounds: last }) = out.last_mut() {
-                last.b = bounds.b.clone();
-                continue;
+                if last.merge_skip(&bounds) {
+                    continue;
+                }
             }
             out.push(Range::Skip { bounds });
         } else {
@@ -106,7 +107,7 @@ mod tests {
         let b = RangeBounds::window(10, 20).unwrap();
         let c = RangeBounds::window(20, 30).unwrap();
         let merged = merge_skips(vec![
-            Range::skip(a),
+            Range::<SyncId>::skip(a),
             Range::skip(b),
             Range::fingerprint(c, [1u8; 32]),
         ]);

@@ -67,6 +67,8 @@ Honest-but-curious peers. The channel **must** be authenticated, confidential, a
 
 Range-based set reconciliation over any totally ordered item type (`ReconcileItem`). The session is type-state (`Reconcile<Running>`), same idea as `PsiProtocol<S>`: `step` consumes `self`. Type parameters default to `SyncId { timestamp, hash }`, the LIP-182 identifier (ordered by time then hash, XOR-of-hashes fingerprint, time/hash-space splits). Other types need only `Ord` plus a fingerprint; they split ranges using local item values as cut points.
 
+The local set is a **monoid tree** (Meyer, Algorithm 1): each AVL node stores the XOR fingerprint and size of its subtree, so a range fingerprint is a path walk rather than a scan. `TaggedStore` nests that tree into a 2-D range tree (tag × item). Query a single topic with `RectBounds::topic` — never a hash **interval** of topics, which would include exclusive subscriptions whose hashes fall between two shared ones. `topic-sync` still keeps per-topic stores and PSI for that reason.
+
 This crate implements **reconciliation only**, not a transfer protocol and not Waku message hashing (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself. `codec`, `RangeBounds::window`, and `prune_before` are `SyncId`-specific.
 
 ### Flow
@@ -97,6 +99,18 @@ match b.step(first)? {
         let _ = a.step(message)?;
     }
 }
+# Ok::<(), reconciliation::ReconcileError>(())
+```
+
+Items that also have a tag (topic) live in `TaggedStore`. Reconcile a single topic with `RectBounds::topic`; a tag **interval** over hashed topics would include exclusive subscriptions and is not how `topic-sync` queries the store.
+
+```rust
+use reconciliation::{RangeBounds, RectBounds, TaggedStore, SyncId};
+
+let mut store = TaggedStore::new(Default::default())?;
+store.insert([0x11; 32], SyncId::new(1, [1u8; 32]))?;
+let bounds = RectBounds::topic([0x11; 32], RangeBounds::window(0, 10)?)?;
+assert_eq!(store.count(bounds), 1);
 # Ok::<(), reconciliation::ReconcileError>(())
 ```
 

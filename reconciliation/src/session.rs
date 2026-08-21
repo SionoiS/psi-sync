@@ -1,11 +1,10 @@
 //! Type-state reconciliation session.
 
-use crate::bounds::RangeBounds;
 use crate::error::{ReconcileError, Result};
 use crate::id::SyncId;
-use crate::item::ReconcileItem;
 use crate::process::process_payload;
 use crate::range::{Range, ReconcileMessage};
+use crate::source::{ReconcileSource, SessionBounds};
 use crate::state::{ReconcileState, Running};
 use crate::store::ReconcileStore;
 use std::collections::BTreeSet;
@@ -21,16 +20,16 @@ pub struct ReconcileResult<T = SyncId> {
 
 /// Outcome of [`Reconcile::step`].
 #[derive(Debug)]
-pub enum ReconcileStep<'store, T: ReconcileItem = SyncId> {
+pub enum ReconcileStep<'store, Src: ReconcileSource = ReconcileStore> {
     /// Send `message` and continue with `next`.
     Next {
-        next: Reconcile<'store, Running, T>,
-        message: ReconcileMessage<T>,
+        next: Reconcile<'store, Running, Src>,
+        message: ReconcileMessage<Src::Item, Src::Bounds>,
     },
     /// Session over. Send `farewell` if this side produced the empty closer.
     Done {
-        result: ReconcileResult<T>,
-        farewell: Option<ReconcileMessage<T>>,
+        result: ReconcileResult<Src::Item>,
+        farewell: Option<ReconcileMessage<Src::Item, Src::Bounds>>,
     },
 }
 
@@ -38,26 +37,31 @@ pub enum ReconcileStep<'store, T: ReconcileItem = SyncId> {
 ///
 /// Construct with [`Reconcile::initiate`] or [`Reconcile::respond`]. Only
 /// [`Reconcile<Running>`] has [`step`](Reconcile::step).
-pub struct Reconcile<'store, S: ReconcileState, T: ReconcileItem = SyncId> {
-    store: &'store ReconcileStore<T>,
+pub struct Reconcile<'store, S: ReconcileState, Src: ReconcileSource = ReconcileStore> {
+    store: &'store Src,
     state: S,
-    to_send: BTreeSet<T>,
-    to_recv: BTreeSet<T>,
+    to_send: BTreeSet<Src::Item>,
+    to_recv: BTreeSet<Src::Item>,
 }
 
-impl<S: ReconcileState, T: ReconcileItem> std::fmt::Debug for Reconcile<'_, S, T> {
+impl<S: ReconcileState, Src: ReconcileSource> std::fmt::Debug for Reconcile<'_, S, Src> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reconcile").finish_non_exhaustive()
     }
 }
 
-impl<'store, T: ReconcileItem> Reconcile<'store, Running, T> {
+type SourceMessage<Src> =
+    ReconcileMessage<<Src as ReconcileSource>::Item, <Src as ReconcileSource>::Bounds>;
+#[cfg(test)]
+type PairResult<Src> = (
+    ReconcileResult<<Src as ReconcileSource>::Item>,
+    ReconcileResult<<Src as ReconcileSource>::Item>,
+);
+
+impl<'store, Src: ReconcileSource> Reconcile<'store, Running, Src> {
     /// Start as initiator: one Fingerprint over `bounds`.
-    pub fn initiate(
-        store: &'store ReconcileStore<T>,
-        bounds: RangeBounds<T>,
-    ) -> Result<(Self, ReconcileMessage<T>)> {
-        if bounds.a >= bounds.b {
+    pub fn initiate(store: &'store Src, bounds: Src::Bounds) -> Result<(Self, SourceMessage<Src>)> {
+        if !bounds.is_valid() {
             return Err(ReconcileError::InvalidBounds);
         }
         let session = Self {
@@ -74,7 +78,7 @@ impl<'store, T: ReconcileItem> Reconcile<'store, Running, T> {
     }
 
     /// Start as responder. The first [`step`](Self::step) consumes the initiator message.
-    pub fn respond(store: &'store ReconcileStore<T>) -> Self {
+    pub fn respond(store: &'store Src) -> Self {
         Self {
             store,
             state: Running::new(),
@@ -84,7 +88,7 @@ impl<'store, T: ReconcileItem> Reconcile<'store, Running, T> {
     }
 
     /// Process one incoming message. Consumes `self`.
-    pub fn step(mut self, incoming: ReconcileMessage<T>) -> Result<ReconcileStep<'store, T>> {
+    pub fn step(mut self, incoming: SourceMessage<Src>) -> Result<ReconcileStep<'store, Src>> {
         if incoming.is_empty() {
             return Ok(ReconcileStep::Done {
                 result: self.into_result(),
@@ -116,7 +120,7 @@ impl<'store, T: ReconcileItem> Reconcile<'store, Running, T> {
         })
     }
 
-    fn into_result(self) -> ReconcileResult<T> {
+    fn into_result(self) -> ReconcileResult<Src::Item> {
         ReconcileResult {
             to_send: self.to_send.into_iter().collect(),
             to_recv: self.to_recv.into_iter().collect(),
@@ -126,22 +130,22 @@ impl<'store, T: ReconcileItem> Reconcile<'store, Running, T> {
 
 /// Drive two sessions to completion over an in-memory channel.
 #[cfg(test)]
-pub(crate) fn run_pair<T: ReconcileItem>(
-    alice_store: &ReconcileStore<T>,
-    bob_store: &ReconcileStore<T>,
-    bounds: RangeBounds<T>,
-) -> Result<(ReconcileResult<T>, ReconcileResult<T>)> {
+pub(crate) fn run_pair<Src: ReconcileSource>(
+    alice_store: &Src,
+    bob_store: &Src,
+    bounds: Src::Bounds,
+) -> Result<PairResult<Src>> {
     let (alice, first) = Reconcile::initiate(alice_store, bounds)?;
     let bob = Reconcile::respond(bob_store);
     drive(alice, bob, first)
 }
 
 #[cfg(test)]
-fn drive<'a, T: ReconcileItem>(
-    mut alice: Reconcile<'a, Running, T>,
-    mut bob: Reconcile<'a, Running, T>,
-    mut incoming: ReconcileMessage<T>,
-) -> Result<(ReconcileResult<T>, ReconcileResult<T>)> {
+fn drive<'a, Src: ReconcileSource>(
+    mut alice: Reconcile<'a, Running, Src>,
+    mut bob: Reconcile<'a, Running, Src>,
+    mut incoming: SourceMessage<Src>,
+) -> Result<PairResult<Src>> {
     loop {
         match bob.step(incoming)? {
             ReconcileStep::Next { next, message } => {
@@ -166,10 +170,10 @@ fn drive<'a, T: ReconcileItem>(
 }
 
 #[cfg(test)]
-fn finish_peer<T: ReconcileItem>(
-    session: Reconcile<'_, Running, T>,
-    farewell: Option<ReconcileMessage<T>>,
-) -> Result<ReconcileResult<T>> {
+fn finish_peer<Src: ReconcileSource>(
+    session: Reconcile<'_, Running, Src>,
+    farewell: Option<SourceMessage<Src>>,
+) -> Result<ReconcileResult<Src::Item>> {
     match farewell {
         None => match session.step(ReconcileMessage::empty())? {
             ReconcileStep::Done { result, .. } => Ok(result),
@@ -189,8 +193,10 @@ fn finish_peer<T: ReconcileItem>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bounds::RangeBounds;
     use crate::config::ReconcileConfig;
     use crate::id::SyncId;
+    use crate::range::Range;
 
     fn sid(t: u64, h0: u8) -> SyncId {
         let mut hash = [0u8; 32];
@@ -339,6 +345,7 @@ mod tests {
 #[cfg(test)]
 mod generic_item_tests {
     use super::*;
+    use crate::bounds::RangeBounds;
     use crate::config::ReconcileConfig;
     use crate::item::ReconcileItem;
 
@@ -354,6 +361,10 @@ mod generic_item_tests {
 
         fn accumulate(fp: &mut u64, item: &Self) {
             *fp ^= item.0;
+        }
+
+        fn combine(a: &u64, b: &u64) -> u64 {
+            a ^ b
         }
     }
 
