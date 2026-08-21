@@ -39,11 +39,13 @@ pub trait ReconcileItem: Clone + Ord + Debug {
         fp
     }
 
-    /// Split `[bounds.a, bounds.b)` into at most `count` subranges.
+    /// Split `[bounds.a, bounds.b)` into subranges.
     ///
     /// The default uses [`Self::partition_domain`] when present, otherwise
     /// `local` item values as cut points. Types with a splittable domain
-    /// (such as [`SyncId`]) override [`Self::partition_domain`].
+    /// (such as [`SyncId`]) override [`Self::partition_domain`]. Recency
+    /// via [`Self::partition_domain_hot`] may emit one cold prefix plus
+    /// `count` hot slices.
     ///
     /// Return fewer than two parts to force an item-set fallback.
     fn partition(
@@ -67,6 +69,7 @@ pub trait ReconcileItem: Clone + Ord + Debug {
     }
 
     /// Domain split that may isolate a recency window. Default is [`partition_domain`].
+    /// Recency may emit one cold prefix plus `count` hot slices.
     fn partition_domain_hot(
         bounds: RangeBounds<Self>,
         count: usize,

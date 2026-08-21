@@ -35,9 +35,11 @@ pub trait ReconcileSource {
     /// Number of items in `bounds`.
     fn count(&self, bounds: Self::Bounds) -> usize;
 
-    /// Covering split of `bounds` into at most `count` subranges.
+    /// Covering split of `bounds` into subranges.
     ///
-    /// Return fewer than two parts to force an item-set fallback.
+    /// Recency-biased [`crate::SyncId`] splits on [`crate::ReconcileStore`] may
+    /// return one cold prefix plus `count` hot slices. Return fewer than two
+    /// parts to force an item-set fallback.
     fn partition(&self, bounds: Self::Bounds, count: usize) -> Vec<Self::Bounds>;
 
     /// Session tunables.

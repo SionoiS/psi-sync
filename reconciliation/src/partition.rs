@@ -97,6 +97,9 @@ pub fn partition_range(bounds: RangeBounds<SyncId>, count: usize) -> Vec<RangeBo
 
 /// [`partition_range`], optionally isolating a recency window of `hot_tail`
 /// time units as a cold prefix plus an equal-time split of the tail.
+///
+/// Recency applies whenever `dt > w`, relative to this range's `b`. A later
+/// split of the cold prefix therefore peels another `w` from the end.
 pub fn partition_range_with_hot(
     bounds: RangeBounds<SyncId>,
     count: usize,
@@ -479,5 +482,32 @@ mod tests {
             partition_range_with_hot(hash_bounds, 8, Some(100)),
             partition_range(hash_bounds, 8)
         );
+        let one_tick = RangeBounds::window(5, 6).unwrap();
+        assert_eq!(
+            partition_range_with_hot(one_tick, 8, Some(100)),
+            partition_range(one_tick, 8)
+        );
+    }
+
+    #[test]
+    fn hot_tail_peels_again_on_cold_prefix() {
+        let bounds = RangeBounds::window(0, 1000).unwrap();
+        let first = partition_range_with_hot(bounds, 8, Some(100));
+        let cold = first[0];
+        assert_eq!(cold, RangeBounds::window(0, 900).unwrap());
+        let again = partition_range_with_hot(cold, 8, Some(100));
+        assert_eq!(again.len(), 9);
+        assert_eq!(again[0], RangeBounds::window(0, 800).unwrap());
+        let hot = RangeBounds::window(800, 900).unwrap();
+        assert_eq!(&again[1..], partition_range(hot, 8).as_slice());
+        let mut cur = bounds;
+        let mut peels = 0;
+        while cur.b.timestamp.saturating_sub(cur.a.timestamp) > 100 {
+            let parts = partition_range_with_hot(cur, 8, Some(100));
+            cur = parts[0];
+            peels += 1;
+        }
+        assert_eq!(peels, 9);
+        assert_eq!(cur, RangeBounds::window(0, 100).unwrap());
     }
 }

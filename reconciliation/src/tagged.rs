@@ -561,6 +561,7 @@ fn tag_spans_abut<K: Ord>(left: &TagRange<K>, right: &TagRange<K>) -> bool {
 mod tests {
     use super::*;
     use crate::error::ReconcileError;
+    use crate::partition::partition_range;
     use crate::range::{ItemSet, Range, ReconcileMessage};
     use crate::session::{run_pair, Reconcile};
     use crate::source::SessionBounds;
@@ -834,5 +835,25 @@ mod tests {
         assert_eq!(parts[1].item.b, Key(50));
         assert_eq!(parts[2].item.b, Key(70));
         assert_eq!(parts[3].item.b, Key(100));
+    }
+
+    #[test]
+    fn one_tag_syncid_ignores_hot_tail() {
+        let cfg = ReconcileConfig {
+            hot_tail: Some(100),
+            partitions: 8,
+            ..Default::default()
+        };
+        let s = TaggedStore::<SyncId>::new(cfg).unwrap();
+        let item_bounds = RangeBounds::window(0, 1000).unwrap();
+        let tag = [1u8; 32];
+        let bounds = RectBounds::topic(tag, item_bounds).unwrap();
+        let parts = ReconcileSource::partition(&s, bounds, 8);
+        let expect = partition_range(item_bounds, 8);
+        assert_eq!(parts.len(), expect.len());
+        for (got, exp) in parts.iter().zip(expect.iter()) {
+            assert_eq!(got.tag, TagRange::one(tag));
+            assert_eq!(got.item, *exp);
+        }
     }
 }

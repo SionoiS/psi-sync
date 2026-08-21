@@ -14,14 +14,21 @@ pub struct ReconcileConfig {
     /// Send an item set instead of partitioning when a range has at most this
     /// many local items.
     pub threshold: usize,
-    /// Number of subranges a large fingerprint mismatch is split into.
+    /// Equal-time fanout of a large fingerprint mismatch. When [`Self::hot_tail`]
+    /// is set this is the hot-window split, not the total part count.
     pub partitions: usize,
     /// Maximum distinct items in a store.
     pub max_items: usize,
     /// Maximum `step` calls in one session.
     pub max_rounds: usize,
-    /// Recency window (time units) for [`crate::SyncId`] splits. `None` keeps
+    /// Recency window (time units) used by [`crate::ReconcileStore`] of
+    /// [`crate::SyncId`]. [`crate::TaggedStore`] ignores it. `None` keeps
     /// equal-time partitioning.
+    ///
+    /// A still-too-large mismatch re-applies the cut relative to that range's
+    /// `b` (peels `w` time units from the end each round). Recent-suffix diffs
+    /// Skip the cold fingerprint in one round. A hole far behind `b` may take
+    /// about `span / w` rounds, bounded by [`Self::max_rounds`].
     pub hot_tail: Option<u64>,
 }
 

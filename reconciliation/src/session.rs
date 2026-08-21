@@ -582,6 +582,87 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, ReconcileError::ItemSetTooLarge { size: 3, max: 2 });
     }
+
+    fn run_pair_steps(
+        alice_store: &ReconcileStore,
+        bob_store: &ReconcileStore,
+        bounds: RangeBounds,
+    ) -> (ReconcileResult, usize) {
+        let (mut alice, first) = Reconcile::initiate(alice_store, bounds).unwrap();
+        let mut bob = Reconcile::respond(bob_store);
+        let mut incoming = first;
+        let mut steps = 0usize;
+        loop {
+            steps += 1;
+            match bob.step(incoming).unwrap() {
+                ReconcileStep::Next { next, message } => {
+                    bob = next;
+                    match alice.step(message).unwrap() {
+                        ReconcileStep::Next { next, message } => {
+                            steps += 1;
+                            alice = next;
+                            incoming = message;
+                        }
+                        ReconcileStep::Done { result, farewell } => {
+                            steps += 1;
+                            let _ = finish_peer(bob, farewell).unwrap();
+                            return (result, steps);
+                        }
+                    }
+                }
+                ReconcileStep::Done { farewell, .. } => {
+                    let ar = finish_peer(alice, farewell).unwrap();
+                    return (ar, steps);
+                }
+            }
+        }
+    }
+
+    fn filled(cfg: ReconcileConfig, extra: Option<(u64, u8)>) -> ReconcileStore {
+        let mut s = ReconcileStore::new(cfg).unwrap();
+        for t in (50..1000).step_by(50) {
+            s.insert(sid(t, t as u8)).unwrap();
+        }
+        if let Some((t, h)) = extra {
+            s.insert(sid(t, h)).unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn hot_tail_peels_distant_prefix_mismatch() {
+        let hot_cfg = ReconcileConfig {
+            threshold: 2,
+            partitions: 8,
+            hot_tail: Some(100),
+            ..Default::default()
+        };
+        let eq_cfg = ReconcileConfig {
+            threshold: 2,
+            partitions: 8,
+            ..Default::default()
+        };
+        let alice_hot = filled(hot_cfg, Some((10, 1)));
+        let bob_hot = filled(hot_cfg, None);
+        let alice_eq = filled(eq_cfg, Some((10, 1)));
+        let bob_eq = filled(eq_cfg, None);
+        let bounds = RangeBounds::window(0, 1000).unwrap();
+        let (ar_hot, steps_hot) = run_pair_steps(&alice_hot, &bob_hot, bounds);
+        let (ar_eq, steps_eq) = run_pair_steps(&alice_eq, &bob_eq, bounds);
+        assert_eq!(ar_hot.to_send, vec![sid(10, 1)]);
+        assert!(ar_hot.to_recv.is_empty());
+        assert_eq!(ar_eq.to_send, vec![sid(10, 1)]);
+        // Recency peels w=100 from b each mismatch of the cold prefix
+        // (~span/w rounds) instead of an equal-time search of the past.
+        assert!(
+            steps_hot > steps_eq,
+            "hot_tail steps {steps_hot} should exceed equal-time {steps_eq}"
+        );
+        assert!(
+            steps_hot >= 9,
+            "expected about span/w peels, got {steps_hot} steps"
+        );
+    }
 }
 
 #[cfg(test)]
