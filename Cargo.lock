@@ -81,6 +81,7 @@ dependencies = [
  "psi",
  "rand",
  "reconciliation",
+ "topic-sync",
 ]
 
 [[package]]
@@ -252,6 +253,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "topic-sync"
+version = "0.2.0"
+dependencies = [
+ "psi",
+ "reconciliation",
+ "thiserror",
 ]
 
 [[package]]

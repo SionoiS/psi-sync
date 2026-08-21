@@ -1,5 +1,5 @@
 [workspace]
-members = ["psi", "reconciliation", "examples"]
+members = ["psi", "reconciliation", "topic-sync", "examples"]
 resolver = "2"
 
 [workspace.package]

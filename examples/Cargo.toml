@@ -14,7 +14,12 @@ path = "src/bin/in_memory.rs"
 name = "reconcile"
 path = "src/bin/reconcile.rs"
 
+[[bin]]
+name = "topic_sync"
+path = "src/bin/topic_sync.rs"
+
 [dependencies]
 psi = { path = "../psi" }
 reconciliation = { path = "../reconciliation" }
+topic-sync = { path = "../topic-sync" }
 rand.workspace = true

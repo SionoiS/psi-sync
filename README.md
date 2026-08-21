@@ -1,14 +1,15 @@
 # psi-sync
 
-Rust workspace with two complementary two-party set protocols:
+Rust workspace with two complementary two-party set protocols and a crate that composes them:
 
 | Crate | Role |
 | --- | --- |
 | `psi` | ECDH **private set intersection** on Ristretto |
 | `reconciliation` | **Range-based set reconciliation** ([LIP-182 WAKU-SYNC](https://lip.logos.co/messaging/core/raw/sync.html)) |
-| `examples` | In-process demos (`in_memory`, `reconcile`) |
+| `topic-sync` | PSI on **topics**, then reconciliation on the **shared** topics' messages |
+| `examples` | In-process demos (`in_memory`, `reconcile`, `topic_sync`) |
 
-They solve different problems. PSI hides exclusive items and returns only the intersection. Reconciliation finds the symmetric difference so two stores can converge; differing ranges **reveal identifiers**.
+They solve different problems. PSI hides exclusive items and returns only the intersection. Reconciliation finds the symmetric difference so two stores can converge; differing ranges **reveal identifiers**. `topic-sync` runs PSI first so exclusive subscriptions never enter a reconcile ItemSet.
 
 ---
 
@@ -105,16 +106,61 @@ Peers are trusted to follow the protocol. Fingerprints leak the XOR of hashes in
 
 ---
 
+## `topic-sync`
+
+Two parties each hold a map of **topics** (opaque byte strings) to per-topic `ReconcileStore`s. After one session they both know:
+
+1. Which topics they share (PSI). Exclusive topics stay hidden.
+2. For each shared topic, which `SyncId`s to send and receive (LIP-182).
+
+Payload transfer is still the caller's job. The time window is the same for every shared topic. Topics are reconciled sequentially in lexicographic PSI-hash order. Transport- and codec-agnostic.
+
+### Flow
+
+1. `TopicSync::initiate(&stores, bounds)` sends blinded topic points.
+2. The responder `step`s that into a `PsiOffer` (own blinded points + double-blind of the initiator).
+3. The initiator `step`s the offer, finalizes PSI, and sends `PsiDone` — the double-blind plus, if the intersection is non-empty, the first topic's reconcile fingerprint.
+4. Each shared topic runs an inner `Reconcile`. The initiator ends a topic with `TopicComplete`, which absorbs the LIP-182 empty closer and may carry the next topic's fingerprint.
+5. `SyncResult.topics` lists per-topic `to_send` / `to_recv`. Stores are not mutated.
+
+Empty topic intersection is a successful no-op: no reconcile frames, no message IDs exchanged.
+
+### Usage
+
+```rust
+use topic_sync::{RangeBounds, ReconcileStore, SyncId, TopicStores, TopicSync};
+
+let mut alice = TopicStores::new();
+let mut bob = TopicStores::new();
+alice.insert(b"chat".to_vec(), ReconcileStore::new(Default::default())?)?;
+bob.insert(b"chat".to_vec(), ReconcileStore::new(Default::default())?)?;
+alice.get_mut(b"chat").unwrap().insert(SyncId::new(1, [1u8; 32]))?;
+
+let bounds = RangeBounds::window(0, 10)?;
+let (alice_sess, first) = TopicSync::initiate(&alice, bounds)?;
+let bob_sess = TopicSync::respond(&bob, bounds)?;
+let _ = (alice_sess, first, bob_sess);
+# Ok::<(), topic_sync::TopicSyncError>(())
+```
+
+### Topic-sync threat model
+
+Union of the two sub-protocols. Honest-but-curious peers; authenticated, confidential, **order-preserving** channel. Topic-set sizes leak. Shared topic **hashes** appear on reconcile frames; raw exclusive topic bytes do not. Message IDs in a differing range leak. A peer can lie about its topic set or Skip/invent IDs.
+
+---
+
 ## Develop
 
 ```bash
 cargo test --workspace
 cargo test --doc -p psi
 cargo test --doc -p reconciliation
+cargo test --doc -p topic-sync
 cargo clippy --workspace --all-targets -- --deny warnings
 cargo fmt --all -- --check
 cargo run -p examples --bin in_memory
 cargo run -p examples --bin reconcile
+cargo run -p examples --bin topic_sync
 ```
 
 ## License

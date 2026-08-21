@@ -1,0 +1,14 @@
+[package]
+name = "topic-sync"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "PSI on topics, then per-topic range-based message reconciliation"
+
+[dependencies]
+psi = { path = "../psi" }
+reconciliation = { path = "../reconciliation" }
+thiserror.workspace = true
