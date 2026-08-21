@@ -29,8 +29,7 @@ pub(crate) fn process_payload<Src: ReconcileSource>(
             _ => None,
         })
         .collect();
-    let ours_fps = store.fingerprints(&fp_bounds);
-    let ours_counts = store.counts(&fp_bounds);
+    let ours = store.fingerprint_counts(&fp_bounds);
     let mut fp_i = 0;
 
     for range in &incoming.ranges {
@@ -46,8 +45,8 @@ pub(crate) fn process_payload<Src: ReconcileSource>(
                     store,
                     bounds.clone(),
                     fingerprint.clone(),
-                    ours_fps[fp_i].clone(),
-                    ours_counts[fp_i],
+                    ours[fp_i].0.clone(),
+                    ours[fp_i].1,
                     &mut reply_ranges,
                 );
                 fp_i += 1;
@@ -121,9 +120,8 @@ fn process_fingerprint<Src: ReconcileSource>(
         return;
     }
 
-    let part_counts = store.counts(&parts);
-    let part_fps = store.fingerprints(&parts);
-    for ((part, count), fp) in parts.into_iter().zip(part_counts).zip(part_fps) {
+    let part_stats = store.fingerprint_counts(&parts);
+    for (part, (fp, count)) in parts.into_iter().zip(part_stats) {
         if count <= threshold {
             out.push(Range::item_set(
                 part.clone(),

@@ -68,16 +68,19 @@ impl<T: ReconcileItem> ReconcileStore<T> {
         self.items.aggregate_range(&bounds.a, &bounds.b)
     }
 
+    /// Fingerprint and count of each sorted, disjoint bound in one tree walk.
+    pub fn fingerprint_counts(&self, bounds: &[RangeBounds<T>]) -> Vec<(T::Fingerprint, usize)> {
+        self.items.aggregate_and_count_ranges(bounds)
+    }
+
     /// Fingerprints of sorted, disjoint `bounds` in one tree walk.
     pub fn fingerprints(&self, bounds: &[RangeBounds<T>]) -> Vec<T::Fingerprint> {
-        let ranges: Vec<(T, T)> = bounds.iter().map(|b| (b.a.clone(), b.b.clone())).collect();
-        self.items.aggregate_ranges(&ranges)
+        self.items.aggregate_ranges(bounds)
     }
 
     /// Counts of sorted, disjoint `bounds` in one tree walk.
     pub fn counts(&self, bounds: &[RangeBounds<T>]) -> Vec<usize> {
-        let ranges: Vec<(T, T)> = bounds.iter().map(|b| (b.a.clone(), b.b.clone())).collect();
-        self.items.count_ranges(&ranges)
+        self.items.count_ranges(bounds)
     }
 
     fn items_vec(&self, bounds: RangeBounds<T>) -> Vec<T> {
@@ -95,6 +98,10 @@ impl<T: ReconcileItem> ReconcileSource for ReconcileStore<T> {
 
     fn fingerprints(&self, bounds: &[Self::Bounds]) -> Vec<T::Fingerprint> {
         ReconcileStore::fingerprints(self, bounds)
+    }
+
+    fn fingerprint_counts(&self, bounds: &[Self::Bounds]) -> Vec<(T::Fingerprint, usize)> {
+        ReconcileStore::fingerprint_counts(self, bounds)
     }
 
     fn items(&self, bounds: Self::Bounds) -> Vec<T> {
@@ -336,13 +343,17 @@ mod tests {
             RangeBounds::window(15, 20).unwrap(),
             RangeBounds::window(30, 40).unwrap(),
         ];
+        let bulk = ReconcileSource::fingerprint_counts(&s, &bounds);
         let bulk_fp = ReconcileSource::fingerprints(&s, &bounds);
         let bulk_n = ReconcileSource::counts(&s, &bounds);
-        assert_eq!(bulk_fp.len(), 3);
+        assert_eq!(bulk.len(), 3);
         for (i, b) in bounds.iter().enumerate() {
-            assert_eq!(bulk_fp[i], ReconcileSource::fingerprint(&s, *b));
-            assert_eq!(bulk_n[i], ReconcileSource::count(&s, *b));
+            assert_eq!(bulk[i].0, ReconcileSource::fingerprint(&s, *b));
+            assert_eq!(bulk[i].1, ReconcileSource::count(&s, *b));
+            assert_eq!(bulk_fp[i], bulk[i].0);
+            assert_eq!(bulk_n[i], bulk[i].1);
         }
+        assert!(ReconcileSource::fingerprint_counts(&s, &[] as &[RangeBounds]).is_empty());
         assert!(ReconcileSource::fingerprints(&s, &[] as &[RangeBounds]).is_empty());
         assert!(ReconcileSource::counts(&s, &[] as &[RangeBounds]).is_empty());
     }

@@ -4,6 +4,7 @@
 //! fingerprints and counts are path aggregations; insert/delete recompute
 //! labels along the rotation path.
 
+use crate::bounds::RangeBounds;
 use crate::item::ReconcileItem;
 
 pub(crate) struct Node<T: ReconcileItem> {
@@ -90,18 +91,21 @@ impl<T: ReconcileItem> MonoidTree<T> {
         count_range(self.root.as_deref(), lo, hi)
     }
 
-    /// Fingerprints of sorted, disjoint `[lo, hi)` intervals in one covering walk.
+    /// Fingerprints and counts of sorted, disjoint `[lo, hi)` intervals in one walk.
     ///
     /// `ranges` must be sorted and pairwise disjoint with `lo < hi` in each pair.
     /// Empty holes between ranges are skipped. Empty input yields an empty vec.
-    pub(crate) fn aggregate_ranges(&self, ranges: &[(T, T)]) -> Vec<T::Fingerprint> {
-        debug_assert!(ranges.iter().all(|(lo, hi)| lo < hi));
-        debug_assert!(ranges.windows(2).all(|w| w[0].1 <= w[1].0));
+    pub(crate) fn aggregate_and_count_ranges(
+        &self,
+        ranges: &[RangeBounds<T>],
+    ) -> Vec<(T::Fingerprint, usize)> {
+        debug_assert!(ranges.iter().all(|r| r.a < r.b));
+        debug_assert!(ranges.windows(2).all(|w| w[0].b <= w[1].a));
         if ranges.is_empty() {
             return Vec::new();
         }
-        let mut out = vec![T::empty_fingerprint(); ranges.len()];
-        cover_fp(
+        let mut out = vec![(T::empty_fingerprint(), 0); ranges.len()];
+        cover(
             self.root.as_deref(),
             None,
             None,
@@ -113,26 +117,20 @@ impl<T: ReconcileItem> MonoidTree<T> {
         out
     }
 
+    /// Fingerprints of sorted, disjoint `[lo, hi)` intervals in one covering walk.
+    pub(crate) fn aggregate_ranges(&self, ranges: &[RangeBounds<T>]) -> Vec<T::Fingerprint> {
+        self.aggregate_and_count_ranges(ranges)
+            .into_iter()
+            .map(|(fp, _)| fp)
+            .collect()
+    }
+
     /// Counts of sorted, disjoint `[lo, hi)` intervals in one covering walk.
-    ///
-    /// Same preconditions as [`Self::aggregate_ranges`].
-    pub(crate) fn count_ranges(&self, ranges: &[(T, T)]) -> Vec<usize> {
-        debug_assert!(ranges.iter().all(|(lo, hi)| lo < hi));
-        debug_assert!(ranges.windows(2).all(|w| w[0].1 <= w[1].0));
-        if ranges.is_empty() {
-            return Vec::new();
-        }
-        let mut out = vec![0usize; ranges.len()];
-        cover_count(
-            self.root.as_deref(),
-            None,
-            None,
-            ranges,
-            0,
-            ranges.len(),
-            &mut out,
-        );
-        out
+    pub(crate) fn count_ranges(&self, ranges: &[RangeBounds<T>]) -> Vec<usize> {
+        self.aggregate_and_count_ranges(ranges)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect()
     }
 
     /// n-th item in in-order (0-based).
@@ -502,7 +500,7 @@ fn subtree_contained<T: Ord>(lo_bound: Option<&T>, hi_bound: Option<&T>, lo: &T,
 fn trim_cover<T: Ord>(
     lo_bound: Option<&T>,
     hi_bound: Option<&T>,
-    ranges: &[(T, T)],
+    ranges: &[RangeBounds<T>],
     mut i: usize,
     mut j: usize,
 ) -> Option<(usize, usize)> {
@@ -511,13 +509,13 @@ fn trim_cover<T: Ord>(
             return None;
         }
         if let Some(lb) = lo_bound {
-            if lb >= &ranges[i].1 {
+            if lb >= &ranges[i].b {
                 i += 1;
                 continue;
             }
         }
         if let Some(hb) = hi_bound {
-            if hb <= &ranges[j - 1].0 {
+            if hb <= &ranges[j - 1].a {
                 j -= 1;
                 continue;
             }
@@ -526,13 +524,18 @@ fn trim_cover<T: Ord>(
     }
 }
 
-fn split_cover<T: Ord>(n: &T, ranges: &[(T, T)], i: usize, j: usize) -> (usize, bool, usize) {
+fn split_cover<T: Ord>(
+    n: &T,
+    ranges: &[RangeBounds<T>],
+    i: usize,
+    j: usize,
+) -> (usize, bool, usize) {
     let mut a = i;
-    while a < j && ranges[a].1 <= *n {
+    while a < j && ranges[a].b <= *n {
         a += 1;
     }
-    let containing = a < j && ranges[a].0 <= *n;
-    let left_j = if containing && ranges[a].0 < *n {
+    let containing = a < j && ranges[a].a <= *n;
+    let left_j = if containing && ranges[a].a < *n {
         a + 1
     } else {
         a
@@ -540,16 +543,16 @@ fn split_cover<T: Ord>(n: &T, ranges: &[(T, T)], i: usize, j: usize) -> (usize, 
     (left_j, containing, a)
 }
 
-/// Covering walk: skip holes via parent bounds; take a subtree label when it
-/// sits entirely inside one remaining range.
-fn cover_fp<T: ReconcileItem>(
+/// Covering walk: skip holes via parent bounds; take a subtree label/size when
+/// it sits entirely inside one remaining range.
+fn cover<T: ReconcileItem>(
     node: Option<&Node<T>>,
     lo_bound: Option<&T>,
     hi_bound: Option<&T>,
-    ranges: &[(T, T)],
+    ranges: &[RangeBounds<T>],
     i: usize,
     j: usize,
-    out: &mut [T::Fingerprint],
+    out: &mut [(T::Fingerprint, usize)],
 ) {
     let Some(n) = node else {
         return;
@@ -558,13 +561,14 @@ fn cover_fp<T: ReconcileItem>(
         return;
     };
 
-    if subtree_contained(lo_bound, hi_bound, &ranges[i].0, &ranges[i].1) {
-        out[i] = T::combine(&out[i], &n.label);
+    if subtree_contained(lo_bound, hi_bound, &ranges[i].a, &ranges[i].b) {
+        out[i].0 = T::combine(&out[i].0, &n.label);
+        out[i].1 += n.size;
         return;
     }
 
     let (left_j, containing, a) = split_cover(&n.value, ranges, i, j);
-    cover_fp(
+    cover(
         n.left.as_deref(),
         lo_bound,
         Some(&n.value),
@@ -574,54 +578,10 @@ fn cover_fp<T: ReconcileItem>(
         out,
     );
     if containing {
-        out[a] = T::combine(&out[a], &T::singleton(&n.value));
+        out[a].0 = T::combine(&out[a].0, &T::singleton(&n.value));
+        out[a].1 += 1;
     }
-    cover_fp(
-        n.right.as_deref(),
-        Some(&n.value),
-        hi_bound,
-        ranges,
-        a,
-        j,
-        out,
-    );
-}
-
-fn cover_count<T: ReconcileItem>(
-    node: Option<&Node<T>>,
-    lo_bound: Option<&T>,
-    hi_bound: Option<&T>,
-    ranges: &[(T, T)],
-    i: usize,
-    j: usize,
-    out: &mut [usize],
-) {
-    let Some(n) = node else {
-        return;
-    };
-    let Some((i, j)) = trim_cover(lo_bound, hi_bound, ranges, i, j) else {
-        return;
-    };
-
-    if subtree_contained(lo_bound, hi_bound, &ranges[i].0, &ranges[i].1) {
-        out[i] += n.size;
-        return;
-    }
-
-    let (left_j, containing, a) = split_cover(&n.value, ranges, i, j);
-    cover_count(
-        n.left.as_deref(),
-        lo_bound,
-        Some(&n.value),
-        ranges,
-        i,
-        left_j,
-        out,
-    );
-    if containing {
-        out[a] += 1;
-    }
-    cover_count(
+    cover(
         n.right.as_deref(),
         Some(&n.value),
         hi_bound,
@@ -766,6 +726,7 @@ fn assert_invariants<T: ReconcileItem>(n: Option<&Node<T>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bounds::RangeBounds;
     use crate::fingerprint::xor_into;
     use crate::id::SyncId;
 
@@ -930,22 +891,30 @@ mod tests {
         assert_eq!(t.nth_in_range(&sid(0, 0), &sid(1, 0), 1), None);
     }
 
-    fn assert_bulk_matches(t: &MonoidTree<SyncId>, ranges: &[(SyncId, SyncId)]) {
-        let bulk_fp = t.aggregate_ranges(ranges);
-        let bulk_n = t.count_ranges(ranges);
-        assert_eq!(bulk_fp.len(), ranges.len());
-        assert_eq!(bulk_n.len(), ranges.len());
-        for (i, (lo, hi)) in ranges.iter().enumerate() {
-            assert_eq!(
-                bulk_fp[i],
-                t.aggregate_range(lo, hi),
-                "fp {i} {lo:?}..{hi:?}"
-            );
-            assert_eq!(bulk_n[i], t.count_range(lo, hi), "count {i} {lo:?}..{hi:?}");
+    fn rb(lo: u64, hi: u64) -> RangeBounds<SyncId> {
+        RangeBounds {
+            a: sid(lo, 0),
+            b: sid(hi, 0),
         }
     }
 
-    fn disjoint_cover(seed: u64, n: u64, k: usize) -> Vec<(SyncId, SyncId)> {
+    fn assert_bulk_matches(t: &MonoidTree<SyncId>, ranges: &[RangeBounds<SyncId>]) {
+        let both = t.aggregate_and_count_ranges(ranges);
+        let bulk_fp = t.aggregate_ranges(ranges);
+        let bulk_n = t.count_ranges(ranges);
+        assert_eq!(both.len(), ranges.len());
+        assert_eq!(bulk_fp.len(), ranges.len());
+        assert_eq!(bulk_n.len(), ranges.len());
+        for (i, r) in ranges.iter().enumerate() {
+            let fp = t.aggregate_range(&r.a, &r.b);
+            let n = t.count_range(&r.a, &r.b);
+            assert_eq!(both[i], (fp, n), "both {i} {:?}..{:?}", r.a, r.b);
+            assert_eq!(bulk_fp[i], fp, "fp {i} {:?}..{:?}", r.a, r.b);
+            assert_eq!(bulk_n[i], n, "count {i} {:?}..{:?}", r.a, r.b);
+        }
+    }
+
+    fn disjoint_cover(seed: u64, n: u64, k: usize) -> Vec<RangeBounds<SyncId>> {
         let mut cuts = vec![0u64];
         let mut x = seed | 1;
         for _ in 0..k {
@@ -960,7 +929,7 @@ mod tests {
         for w in cuts.windows(2) {
             bit = bit.wrapping_mul(0x9e37_79b9_7f4a_7c15);
             if w[0] < w[1] && !bit.is_multiple_of(3) {
-                ranges.push((sid(w[0], 0), sid(w[1], 0)));
+                ranges.push(rb(w[0], w[1]));
             }
         }
         ranges
@@ -972,12 +941,14 @@ mod tests {
         for i in 0..8u8 {
             t.insert(sid(u64::from(i), i));
         }
+        assert!(t.aggregate_and_count_ranges(&[]).is_empty());
         assert!(t.aggregate_ranges(&[]).is_empty());
         assert!(t.count_ranges(&[]).is_empty());
         let empty = MonoidTree::<SyncId>::new();
+        assert!(empty.aggregate_and_count_ranges(&[]).is_empty());
         assert!(empty.aggregate_ranges(&[]).is_empty());
         assert!(empty.count_ranges(&[]).is_empty());
-        assert_bulk_matches(&empty, &[(sid(0, 0), sid(10, 0))]);
+        assert_bulk_matches(&empty, &[rb(0, 10)]);
     }
 
     #[test]
@@ -987,22 +958,8 @@ mod tests {
             t.insert(sid(u64::from(i), i));
         }
         t.assert_invariants();
-        assert_bulk_matches(
-            &t,
-            &[
-                (sid(0, 0), sid(5, 0)),
-                (sid(10, 0), sid(12, 0)),
-                (sid(20, 0), sid(30, 0)),
-            ],
-        );
-        assert_bulk_matches(
-            &t,
-            &[
-                (sid(0, 0), sid(1, 0)),
-                (sid(31, 0), sid(32, 0)),
-                (sid(100, 0), sid(200, 0)),
-            ],
-        );
+        assert_bulk_matches(&t, &[rb(0, 5), rb(10, 12), rb(20, 30)]);
+        assert_bulk_matches(&t, &[rb(0, 1), rb(31, 32), rb(100, 200)]);
     }
 
     #[test]
@@ -1012,16 +969,8 @@ mod tests {
             t.insert(sid(u64::from(i), i));
         }
         t.assert_invariants();
-        assert_bulk_matches(&t, &[(sid(0, 0), sid(100, 0))]);
-        assert_bulk_matches(
-            &t,
-            &[
-                (sid(0, 0), sid(25, 0)),
-                (sid(25, 0), sid(50, 0)),
-                (sid(50, 0), sid(75, 0)),
-                (sid(75, 0), sid(100, 0)),
-            ],
-        );
+        assert_bulk_matches(&t, &[rb(0, 100)]);
+        assert_bulk_matches(&t, &[rb(0, 25), rb(25, 50), rb(50, 75), rb(75, 100)]);
         for seed in 0..32u64 {
             let ranges = disjoint_cover(seed, 100, 12);
             assert_bulk_matches(&t, &ranges);

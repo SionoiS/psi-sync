@@ -44,6 +44,21 @@ pub trait ReconcileSource {
             .collect()
     }
 
+    /// Fingerprint and count of each consecutive bound (partition order).
+    ///
+    /// Default loops [`Self::fingerprint`] and [`Self::count`]. Override to
+    /// fill both in one walk.
+    fn fingerprint_counts(
+        &self,
+        bounds: &[Self::Bounds],
+    ) -> Vec<(<Self::Item as ReconcileItem>::Fingerprint, usize)> {
+        bounds
+            .iter()
+            .cloned()
+            .map(|b| (self.fingerprint(b.clone()), self.count(b)))
+            .collect()
+    }
+
     /// Items in `bounds`, in `Item` order.
     fn items(&self, bounds: Self::Bounds) -> Vec<Self::Item>;
 
