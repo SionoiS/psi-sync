@@ -260,6 +260,135 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_reply_disjoint_from_first_listing() {
+        let alice = store(&[(1, 1), (2, 2)]);
+        let bob = store(&[(1, 1), (3, 3)]);
+        let (alice_sess, first) = Reconcile::initiate(&alice, window()).unwrap();
+        let bob_sess = Reconcile::respond(&bob);
+        let ReconcileStep::Next {
+            message: listing,
+            next: bob_next,
+        } = bob_sess.step(first).unwrap()
+        else {
+            panic!("expected Bob to send an item set");
+        };
+        let listing_elements = match &listing.ranges[0] {
+            Range::Items { set, .. } => {
+                assert!(!set.reconciled);
+                assert!(set.needed.is_empty());
+                set.elements.clone()
+            }
+            other => panic!("expected item set, got {other:?}"),
+        };
+        let ReconcileStep::Next {
+            message: reply,
+            next: alice_next,
+        } = alice_sess.step(listing).unwrap()
+        else {
+            panic!("expected exclusive reply");
+        };
+        match &reply.ranges[0] {
+            Range::Items { set, .. } => {
+                assert!(set.reconciled);
+                for item in &set.elements {
+                    assert!(
+                        !listing_elements.contains(item),
+                        "reply elements must be disjoint from the first listing"
+                    );
+                }
+                assert_eq!(set.elements, vec![sid(2, 2)]);
+                assert_eq!(set.needed, vec![sid(3, 3)]);
+            }
+            other => panic!("expected exclusive item set, got {other:?}"),
+        }
+        let ReconcileStep::Done {
+            result: br,
+            farewell: Some(closer),
+        } = bob_next.step(reply).unwrap()
+        else {
+            panic!("expected Bob to close");
+        };
+        assert!(closer.is_empty());
+        assert_eq!(br.to_send, vec![sid(3, 3)]);
+        assert_eq!(br.to_recv, vec![sid(2, 2)]);
+        let ReconcileStep::Done { result: ar, .. } = alice_next.step(closer).unwrap() else {
+            panic!("expected Alice to finish");
+        };
+        assert_eq!(ar.to_send, br.to_recv);
+        assert_eq!(ar.to_recv, br.to_send);
+    }
+
+    #[test]
+    fn peer_subset_replies_skip() {
+        let alice = store(&[(1, 1), (2, 2)]);
+        let bob = store(&[(1, 1)]);
+        let (alice_sess, first) = Reconcile::initiate(&alice, window()).unwrap();
+        let bob_sess = Reconcile::respond(&bob);
+        let ReconcileStep::Next {
+            message: listing,
+            next: bob_next,
+        } = bob_sess.step(first).unwrap()
+        else {
+            panic!("expected Bob to send an item set");
+        };
+        match &listing.ranges[0] {
+            Range::Items { set, .. } => {
+                assert!(!set.reconciled);
+                assert!(set.needed.is_empty());
+                assert_eq!(set.elements, vec![sid(1, 1)]);
+            }
+            other => panic!("expected item set, got {other:?}"),
+        }
+        let ReconcileStep::Next {
+            message: reply,
+            next: alice_next,
+        } = alice_sess.step(listing).unwrap()
+        else {
+            panic!("expected exclusive reply");
+        };
+        match &reply.ranges[0] {
+            Range::Items { set, .. } => {
+                assert!(set.reconciled);
+                assert_eq!(set.elements, vec![sid(2, 2)]);
+                assert!(set.needed.is_empty());
+            }
+            other => panic!("expected exclusive item set, got {other:?}"),
+        }
+        let ReconcileStep::Done {
+            result: br,
+            farewell: Some(closer),
+        } = bob_next.step(reply).unwrap()
+        else {
+            panic!("expected empty closer");
+        };
+        assert!(closer.is_empty());
+        assert!(br.to_send.is_empty());
+        assert_eq!(br.to_recv, vec![sid(2, 2)]);
+        let ReconcileStep::Done { result: ar, .. } = alice_next.step(closer).unwrap() else {
+            panic!("expected Alice to finish");
+        };
+        assert!(ar.to_recv.is_empty());
+        assert_eq!(ar.to_send, vec![sid(2, 2)]);
+    }
+
+    #[test]
+    fn equal_item_set_is_skip() {
+        let store = store(&[(1, 1), (2, 2)]);
+        let s = Reconcile::respond(&store);
+        match s.step(item_set_msg(vec![sid(1, 1), sid(2, 2)])).unwrap() {
+            ReconcileStep::Done {
+                result,
+                farewell: Some(closer),
+            } => {
+                assert!(closer.is_empty());
+                assert!(result.to_send.is_empty());
+                assert!(result.to_recv.is_empty());
+            }
+            other => panic!("expected Skip/empty closer, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn empty_vs_nonempty() {
         let alice = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         let bob = store(&[(5, 9)]);
@@ -300,12 +429,20 @@ mod tests {
             ReconcileStep::Next { message, .. } => {
                 assert_eq!(message.ranges.len(), 1);
                 match &message.ranges[0] {
-                    Range::Items { set, .. } => assert!(!set.reconciled),
+                    Range::Items { set, .. } => {
+                        assert!(!set.reconciled);
+                        assert!(set.needed.is_empty());
+                        assert_eq!(set.elements, vec![sid(1, 1)]);
+                    }
                     other => panic!("expected item set, got {other:?}"),
                 }
                 match sess.step(message).unwrap() {
                     ReconcileStep::Next { message: reply, .. } => match &reply.ranges[0] {
-                        Range::Items { set, .. } => assert!(set.reconciled),
+                        Range::Items { set, .. } => {
+                            assert!(set.reconciled);
+                            assert_eq!(set.elements, vec![sid(2, 2)]);
+                            assert!(set.needed.is_empty());
+                        }
                         other => panic!("expected reconciled item set, got {other:?}"),
                     },
                     other => panic!("{other:?}"),
@@ -342,12 +479,21 @@ mod tests {
     }
 
     fn item_set_msg(elements: Vec<SyncId>) -> ReconcileMessage {
+        item_set_msg_with(elements, Vec::new(), false)
+    }
+
+    fn item_set_msg_with(
+        elements: Vec<SyncId>,
+        needed: Vec<SyncId>,
+        reconciled: bool,
+    ) -> ReconcileMessage {
         ReconcileMessage {
             ranges: vec![Range::item_set(
                 window(),
                 ItemSet {
                     elements,
-                    reconciled: false,
+                    needed,
+                    reconciled,
                 },
             )],
         }
@@ -391,6 +537,48 @@ mod tests {
         let s = Reconcile::respond(&store);
         let err = s
             .step(item_set_msg(vec![sid(1, 1), sid(2, 2), sid(3, 3)]))
+            .unwrap_err();
+        assert_eq!(err, ReconcileError::ItemSetTooLarge { size: 3, max: 2 });
+    }
+
+    #[test]
+    fn unsorted_needed() {
+        let store = store(&[]);
+        let s = Reconcile::respond(&store);
+        let err = s
+            .step(item_set_msg_with(
+                vec![sid(1, 1)],
+                vec![sid(3, 3), sid(2, 2)],
+                false,
+            ))
+            .unwrap_err();
+        assert_eq!(err, ReconcileError::UnsortedItemSet);
+    }
+
+    #[test]
+    fn needed_outside_bounds() {
+        let store = store(&[]);
+        let s = Reconcile::respond(&store);
+        let err = s
+            .step(item_set_msg_with(vec![], vec![sid(2_000, 1)], false))
+            .unwrap_err();
+        assert_eq!(err, ReconcileError::ItemOutOfBounds);
+    }
+
+    #[test]
+    fn oversized_needed() {
+        let cfg = ReconcileConfig {
+            max_items: 2,
+            ..Default::default()
+        };
+        let store = ReconcileStore::new(cfg).unwrap();
+        let s = Reconcile::respond(&store);
+        let err = s
+            .step(item_set_msg_with(
+                vec![],
+                vec![sid(1, 1), sid(2, 2), sid(3, 3)],
+                true,
+            ))
             .unwrap_err();
         assert_eq!(err, ReconcileError::ItemSetTooLarge { size: 3, max: 2 });
     }

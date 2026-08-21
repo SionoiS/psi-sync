@@ -126,6 +126,7 @@
 //!
 //! [`codec::encode`] / [`codec::decode`] are optional. The session never
 //! calls them. Cluster/shard headers are written as zero and ignored.
+//! Item sets encode `needed` after `elements`; this is not Nwaku's layout.
 
 pub use bounds::RangeBounds;
 pub use config::ReconcileConfig;

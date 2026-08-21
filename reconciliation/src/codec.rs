@@ -1,7 +1,10 @@
-//! Optional LIP-182 bytes for a [`ReconcileMessage`].
+//! Optional LIP-182-inspired bytes for a [`ReconcileMessage`].
 //!
 //! The session API never uses this module. Cluster/shard fields are written as
 //! zeros and ignored on decode. An empty message encodes as a single `0` byte.
+//!
+//! Item sets encode `needed` after `elements` (uleb length + ids, same style).
+//! This is **not** Nwaku's ItemSet layout.
 
 use crate::bounds::RangeBounds;
 use crate::id::{SyncId, EMPTY_HASH};
@@ -130,9 +133,35 @@ pub fn decode(bytes: &[u8]) -> Result<ReconcileMessage<SyncId>> {
 }
 
 fn write_item_set(out: &mut Vec<u8>, set: &ItemSet<SyncId>) {
-    write_uleb128(out, set.elements.len() as u64);
+    write_ids(out, &set.elements);
+    write_ids(out, &set.needed);
+    out.push(u8::from(set.reconciled));
+}
+
+fn read_item_set(bytes: &[u8], idx: &mut usize) -> Result<ItemSet<SyncId>> {
+    let elements = read_ids(bytes, idx)?;
+    let needed = read_ids(bytes, idx)?;
+    if *idx >= bytes.len() {
+        return Err(Error("truncated reconciled flag".into()));
+    }
+    let flag = bytes[*idx];
+    *idx += 1;
+    let reconciled = match flag {
+        0 => false,
+        1 => true,
+        _ => return Err(Error(format!("invalid reconciled byte {flag}"))),
+    };
+    Ok(ItemSet {
+        elements,
+        needed,
+        reconciled,
+    })
+}
+
+fn write_ids(out: &mut Vec<u8>, ids: &[SyncId]) {
+    write_uleb128(out, ids.len() as u64);
     let mut last_time = 0u64;
-    for (i, id) in set.elements.iter().enumerate() {
+    for (i, id) in ids.iter().enumerate() {
         if i == 0 {
             write_uleb128(out, id.timestamp);
         } else {
@@ -141,12 +170,11 @@ fn write_item_set(out: &mut Vec<u8>, set: &ItemSet<SyncId>) {
         out.extend_from_slice(&id.hash);
         last_time = id.timestamp;
     }
-    out.push(u8::from(set.reconciled));
 }
 
-fn read_item_set(bytes: &[u8], idx: &mut usize) -> Result<ItemSet<SyncId>> {
+fn read_ids(bytes: &[u8], idx: &mut usize) -> Result<Vec<SyncId>> {
     let n = read_uleb128(bytes, idx)? as usize;
-    let mut elements = Vec::with_capacity(n);
+    let mut ids = Vec::with_capacity(n);
     let mut last_time = 0u64;
     for i in 0..n {
         let time = if i == 0 {
@@ -160,26 +188,13 @@ fn read_item_set(bytes: &[u8], idx: &mut usize) -> Result<ItemSet<SyncId>> {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&bytes[*idx..*idx + 32]);
         *idx += 32;
-        elements.push(SyncId {
+        ids.push(SyncId {
             timestamp: time,
             hash,
         });
         last_time = time;
     }
-    if *idx >= bytes.len() {
-        return Err(Error("truncated reconciled flag".into()));
-    }
-    let flag = bytes[*idx];
-    *idx += 1;
-    let reconciled = match flag {
-        0 => false,
-        1 => true,
-        _ => return Err(Error(format!("invalid reconciled byte {flag}"))),
-    };
-    Ok(ItemSet {
-        elements,
-        reconciled,
-    })
+    Ok(ids)
 }
 
 #[cfg(test)]
@@ -277,6 +292,21 @@ mod tests {
         let bounds = RangeBounds::window(10, 50).unwrap();
         let set = ItemSet {
             elements: vec![sid(11, 1), sid(12, 2)],
+            needed: Vec::new(),
+            reconciled: true,
+        };
+        let payload = ReconcileMessage {
+            ranges: vec![Range::item_set(bounds, set)],
+        };
+        assert_eq!(decode(&encode(&payload)).unwrap(), payload);
+    }
+
+    #[test]
+    fn round_trip_item_set_with_needed() {
+        let bounds = RangeBounds::window(10, 50).unwrap();
+        let set = ItemSet {
+            elements: vec![sid(11, 1)],
+            needed: vec![sid(12, 2), sid(13, 3)],
             reconciled: true,
         };
         let payload = ReconcileMessage {

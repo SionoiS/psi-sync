@@ -674,6 +674,7 @@ mod tests {
                 bounds,
                 ItemSet {
                     elements: vec![Tagged::new(9, Key(1))],
+                    needed: Vec::new(),
                     reconciled: false,
                 },
             )],

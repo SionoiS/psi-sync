@@ -90,6 +90,7 @@ fn process_fingerprint<Src: ReconcileSource>(
             bounds.clone(),
             ItemSet {
                 elements: store.items(bounds),
+                needed: Vec::new(),
                 reconciled: false,
             },
         ));
@@ -102,6 +103,7 @@ fn process_fingerprint<Src: ReconcileSource>(
             bounds.clone(),
             ItemSet {
                 elements: store.items(bounds),
+                needed: Vec::new(),
                 reconciled: false,
             },
         ));
@@ -114,6 +116,7 @@ fn process_fingerprint<Src: ReconcileSource>(
                 part.clone(),
                 ItemSet {
                     elements: store.items(part),
+                    needed: Vec::new(),
                     reconciled: false,
                 },
             ));
@@ -132,30 +135,29 @@ fn process_item_set<Src: ReconcileSource>(
     out: &mut Vec<Range<Src::Item, Src::Bounds>>,
 ) -> Result<()> {
     let max = store.config().max_items;
-    if theirs.elements.len() > max {
-        return Err(ReconcileError::ItemSetTooLarge {
-            size: theirs.elements.len(),
-            max,
-        });
-    }
-    if theirs.elements.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(ReconcileError::UnsortedItemSet);
-    }
-    if theirs.elements.iter().any(|item| !bounds.contains(item)) {
-        return Err(ReconcileError::ItemOutOfBounds);
+    validate_item_list(&theirs.elements, &bounds, max)?;
+    validate_item_list(&theirs.needed, &bounds, max)?;
+
+    if theirs.reconciled {
+        to_recv.extend(theirs.elements.iter().cloned());
+        to_send.extend(theirs.needed.iter().cloned());
+        out.push(Range::skip(bounds));
+        return Ok(());
     }
 
     let ours = store.items(bounds.clone());
+    let mut exclusive_local = Vec::new();
+    let mut exclusive_remote = Vec::new();
     let mut i = 0;
     let mut j = 0;
     while i < theirs.elements.len() && j < ours.len() {
         match theirs.elements[i].cmp(&ours[j]) {
             std::cmp::Ordering::Less => {
-                to_recv.push(theirs.elements[i].clone());
+                exclusive_remote.push(theirs.elements[i].clone());
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                to_send.push(ours[j].clone());
+                exclusive_local.push(ours[j].clone());
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
@@ -165,24 +167,48 @@ fn process_item_set<Src: ReconcileSource>(
         }
     }
     while i < theirs.elements.len() {
-        to_recv.push(theirs.elements[i].clone());
+        exclusive_remote.push(theirs.elements[i].clone());
         i += 1;
     }
     while j < ours.len() {
-        to_send.push(ours[j].clone());
+        exclusive_local.push(ours[j].clone());
         j += 1;
     }
 
-    if !theirs.reconciled {
+    to_send.extend(exclusive_local.iter().cloned());
+    to_recv.extend(exclusive_remote.iter().cloned());
+
+    if exclusive_local.is_empty() && exclusive_remote.is_empty() {
+        out.push(Range::skip(bounds));
+    } else {
         out.push(Range::item_set(
             bounds,
             ItemSet {
-                elements: ours,
+                elements: exclusive_local,
+                needed: exclusive_remote,
                 reconciled: true,
             },
         ));
-    } else {
-        out.push(Range::skip(bounds));
+    }
+    Ok(())
+}
+
+fn validate_item_list<T: ReconcileItem, B: SessionBounds<Item = T>>(
+    items: &[T],
+    bounds: &B,
+    max: usize,
+) -> Result<()> {
+    if items.len() > max {
+        return Err(ReconcileError::ItemSetTooLarge {
+            size: items.len(),
+            max,
+        });
+    }
+    if items.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(ReconcileError::UnsortedItemSet);
+    }
+    if items.iter().any(|item| !bounds.contains(item)) {
+        return Err(ReconcileError::ItemOutOfBounds);
     }
     Ok(())
 }

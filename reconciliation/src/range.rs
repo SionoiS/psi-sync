@@ -5,11 +5,13 @@ use crate::id::SyncId;
 use crate::item::ReconcileItem;
 use crate::source::SessionBounds;
 
-/// Full listing of items in a range, plus the two-phase handshake flag.
+/// Item list for a range: a first listing (`reconciled = false`) or an exclusive reply.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemSet<T = SyncId> {
-    /// Items in the range, sorted.
+    /// Recursion anchor: local items in the range. Reply: `local \ remote`.
     pub elements: Vec<T>,
+    /// Empty on first send. Reply: `remote \ local` (ids the first sender should upload).
+    pub needed: Vec<T>,
     /// `false` on first send; `true` when replying so the peer can finish.
     pub reconciled: bool,
 }
