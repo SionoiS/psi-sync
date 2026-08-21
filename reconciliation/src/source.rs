@@ -29,11 +29,33 @@ pub trait ReconcileSource {
     /// Fingerprint of items in `bounds`.
     fn fingerprint(&self, bounds: Self::Bounds) -> <Self::Item as ReconcileItem>::Fingerprint;
 
+    /// Fingerprints of consecutive `bounds` (partition order).
+    ///
+    /// Default loops [`Self::fingerprint`]. Stores that can cover sorted
+    /// disjoint intervals in one walk should override.
+    fn fingerprints(
+        &self,
+        bounds: &[Self::Bounds],
+    ) -> Vec<<Self::Item as ReconcileItem>::Fingerprint> {
+        bounds
+            .iter()
+            .cloned()
+            .map(|b| self.fingerprint(b))
+            .collect()
+    }
+
     /// Items in `bounds`, in `Item` order.
     fn items(&self, bounds: Self::Bounds) -> Vec<Self::Item>;
 
     /// Number of items in `bounds`.
     fn count(&self, bounds: Self::Bounds) -> usize;
+
+    /// Counts of consecutive `bounds` (partition order).
+    ///
+    /// Default loops [`Self::count`].
+    fn counts(&self, bounds: &[Self::Bounds]) -> Vec<usize> {
+        bounds.iter().cloned().map(|b| self.count(b)).collect()
+    }
 
     /// Covering split of `bounds` into subranges.
     ///

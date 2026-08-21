@@ -68,6 +68,18 @@ impl<T: ReconcileItem> ReconcileStore<T> {
         self.items.aggregate_range(&bounds.a, &bounds.b)
     }
 
+    /// Fingerprints of sorted, disjoint `bounds` in one tree walk.
+    pub fn fingerprints(&self, bounds: &[RangeBounds<T>]) -> Vec<T::Fingerprint> {
+        let ranges: Vec<(T, T)> = bounds.iter().map(|b| (b.a.clone(), b.b.clone())).collect();
+        self.items.aggregate_ranges(&ranges)
+    }
+
+    /// Counts of sorted, disjoint `bounds` in one tree walk.
+    pub fn counts(&self, bounds: &[RangeBounds<T>]) -> Vec<usize> {
+        let ranges: Vec<(T, T)> = bounds.iter().map(|b| (b.a.clone(), b.b.clone())).collect();
+        self.items.count_ranges(&ranges)
+    }
+
     fn items_vec(&self, bounds: RangeBounds<T>) -> Vec<T> {
         self.items(bounds).cloned().collect()
     }
@@ -81,12 +93,20 @@ impl<T: ReconcileItem> ReconcileSource for ReconcileStore<T> {
         ReconcileStore::fingerprint(self, bounds)
     }
 
+    fn fingerprints(&self, bounds: &[Self::Bounds]) -> Vec<T::Fingerprint> {
+        ReconcileStore::fingerprints(self, bounds)
+    }
+
     fn items(&self, bounds: Self::Bounds) -> Vec<T> {
         self.items_vec(bounds)
     }
 
     fn count(&self, bounds: Self::Bounds) -> usize {
         ReconcileStore::count(self, bounds)
+    }
+
+    fn counts(&self, bounds: &[Self::Bounds]) -> Vec<usize> {
+        ReconcileStore::counts(self, bounds)
     }
 
     fn partition(&self, bounds: Self::Bounds, count: usize) -> Vec<Self::Bounds> {
@@ -303,5 +323,27 @@ mod tests {
         let bounds = RangeBounds::new(Key(0), Key(100)).unwrap();
         let parts = ReconcileSource::partition(&s, bounds.clone(), 4);
         assert_eq!(parts, partition_by_items(bounds, &local, 4));
+    }
+
+    #[test]
+    fn bulk_fingerprints_match_per_range() {
+        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        for i in 0..40u64 {
+            s.insert(sid(i, i as u8)).unwrap();
+        }
+        let bounds = [
+            RangeBounds::window(0, 10).unwrap(),
+            RangeBounds::window(15, 20).unwrap(),
+            RangeBounds::window(30, 40).unwrap(),
+        ];
+        let bulk_fp = ReconcileSource::fingerprints(&s, &bounds);
+        let bulk_n = ReconcileSource::counts(&s, &bounds);
+        assert_eq!(bulk_fp.len(), 3);
+        for (i, b) in bounds.iter().enumerate() {
+            assert_eq!(bulk_fp[i], ReconcileSource::fingerprint(&s, *b));
+            assert_eq!(bulk_n[i], ReconcileSource::count(&s, *b));
+        }
+        assert!(ReconcileSource::fingerprints(&s, &[] as &[RangeBounds]).is_empty());
+        assert!(ReconcileSource::counts(&s, &[] as &[RangeBounds]).is_empty());
     }
 }

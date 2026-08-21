@@ -20,8 +20,18 @@ pub(crate) fn process_payload<Src: ReconcileSource>(
     let mut reply_ranges = Vec::new();
     let mut to_send = Vec::new();
     let mut to_recv = Vec::new();
-    let threshold = store.config().threshold;
-    let partitions = store.config().partitions;
+
+    let fp_bounds: Vec<Src::Bounds> = incoming
+        .ranges
+        .iter()
+        .filter_map(|range| match range {
+            Range::Fingerprint { bounds, .. } => Some(bounds.clone()),
+            _ => None,
+        })
+        .collect();
+    let ours_fps = store.fingerprints(&fp_bounds);
+    let ours_counts = store.counts(&fp_bounds);
+    let mut fp_i = 0;
 
     for range in &incoming.ranges {
         match range {
@@ -36,10 +46,11 @@ pub(crate) fn process_payload<Src: ReconcileSource>(
                     store,
                     bounds.clone(),
                     fingerprint.clone(),
-                    threshold,
-                    partitions,
+                    ours_fps[fp_i].clone(),
+                    ours_counts[fp_i],
                     &mut reply_ranges,
                 );
+                fp_i += 1;
             }
             Range::Items { bounds, set } => {
                 process_item_set(
@@ -75,17 +86,17 @@ fn process_fingerprint<Src: ReconcileSource>(
     store: &Src,
     bounds: Src::Bounds,
     theirs: <Src::Item as ReconcileItem>::Fingerprint,
-    threshold: usize,
-    partitions: usize,
+    ours: <Src::Item as ReconcileItem>::Fingerprint,
+    ours_count: usize,
     out: &mut Vec<Range<Src::Item, Src::Bounds>>,
 ) {
-    let ours = store.fingerprint(bounds.clone());
     if ours == theirs {
         out.push(Range::skip(bounds));
         return;
     }
 
-    if store.count(bounds.clone()) <= threshold {
+    let threshold = store.config().threshold;
+    if ours_count <= threshold {
         out.push(Range::item_set(
             bounds.clone(),
             ItemSet {
@@ -97,7 +108,7 @@ fn process_fingerprint<Src: ReconcileSource>(
         return;
     }
 
-    let parts = store.partition(bounds.clone(), partitions);
+    let parts = store.partition(bounds.clone(), store.config().partitions);
     if parts.len() < 2 {
         out.push(Range::item_set(
             bounds.clone(),
@@ -110,8 +121,10 @@ fn process_fingerprint<Src: ReconcileSource>(
         return;
     }
 
-    for part in parts {
-        if store.count(part.clone()) <= threshold {
+    let part_counts = store.counts(&parts);
+    let part_fps = store.fingerprints(&parts);
+    for ((part, count), fp) in parts.into_iter().zip(part_counts).zip(part_fps) {
+        if count <= threshold {
             out.push(Range::item_set(
                 part.clone(),
                 ItemSet {
@@ -121,7 +134,7 @@ fn process_fingerprint<Src: ReconcileSource>(
                 },
             ));
         } else {
-            out.push(Range::fingerprint(part.clone(), store.fingerprint(part)));
+            out.push(Range::fingerprint(part, fp));
         }
     }
 }
