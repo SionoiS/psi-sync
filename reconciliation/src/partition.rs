@@ -95,6 +95,47 @@ pub fn partition_range(bounds: RangeBounds<SyncId>, count: usize) -> Vec<RangeBo
     partition_hash(bounds, count)
 }
 
+/// [`partition_range`], optionally isolating a recency window of `hot_tail`
+/// time units as a cold prefix plus an equal-time split of the tail.
+pub fn partition_range_with_hot(
+    bounds: RangeBounds<SyncId>,
+    count: usize,
+    hot_tail: Option<u64>,
+) -> Vec<RangeBounds<SyncId>> {
+    if let Some(w) = hot_tail {
+        let dt = bounds.b.timestamp.saturating_sub(bounds.a.timestamp);
+        if dt > w {
+            return partition_recency(bounds, count, w);
+        }
+    }
+    partition_range(bounds, count)
+}
+
+fn partition_recency(
+    bounds: RangeBounds<SyncId>,
+    count: usize,
+    w: u64,
+) -> Vec<RangeBounds<SyncId>> {
+    let hot_lo = SyncId::min_at(bounds.b.timestamp.saturating_sub(w));
+    let mut out = Vec::new();
+    if bounds.a < hot_lo {
+        out.push(RangeBounds {
+            a: bounds.a,
+            b: hot_lo,
+        });
+    }
+    if hot_lo < bounds.b {
+        out.extend(partition_range(
+            RangeBounds {
+                a: hot_lo,
+                b: bounds.b,
+            },
+            count,
+        ));
+    }
+    out
+}
+
 /// N-way split of `[a.timestamp, b.timestamp)`. First/last hashes preserved.
 pub fn partition_time(bounds: RangeBounds<SyncId>, count: usize) -> Vec<RangeBounds<SyncId>> {
     let total = bounds.b.timestamp.saturating_sub(bounds.a.timestamp);
@@ -397,5 +438,46 @@ mod tests {
         let from_slice = partition_by_items(bounds, &local, 4);
         let from_nth = partition_by_nth(bounds, local.len(), 4, |k| local.get(k).copied());
         assert_eq!(from_slice, from_nth);
+    }
+
+    #[test]
+    fn hot_tail_cold_prefix_plus_equal_time_hot() {
+        let bounds = RangeBounds::window(0, 1000).unwrap();
+        let parts = partition_range_with_hot(bounds, 8, Some(100));
+        assert_eq!(parts.len(), 9);
+        assert_eq!(parts[0].a, bounds.a);
+        assert_eq!(parts[0].b, SyncId::min_at(900));
+        assert_eq!(parts[8].b, bounds.b);
+        for w in parts.windows(2) {
+            assert_eq!(w[0].b, w[1].a);
+        }
+        let hot = RangeBounds::window(900, 1000).unwrap();
+        assert_eq!(&parts[1..], partition_range(hot, 8).as_slice());
+    }
+
+    #[test]
+    fn hot_tail_none_matches_partition_range() {
+        let bounds = RangeBounds::window(0, 1000).unwrap();
+        assert_eq!(
+            partition_range_with_hot(bounds, 8, None),
+            partition_range(bounds, 8)
+        );
+        let tight = RangeBounds::window(0, 100).unwrap();
+        assert_eq!(
+            partition_range_with_hot(tight, 8, Some(100)),
+            partition_range(tight, 8)
+        );
+        let a = SyncId::min_at(5);
+        let mut hb = [0u8; 32];
+        hb[0] = 0x80;
+        let b = SyncId {
+            timestamp: 5,
+            hash: hb,
+        };
+        let hash_bounds = RangeBounds::new(a, b).unwrap();
+        assert_eq!(
+            partition_range_with_hot(hash_bounds, 8, Some(100)),
+            partition_range(hash_bounds, 8)
+        );
     }
 }

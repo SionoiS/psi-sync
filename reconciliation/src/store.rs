@@ -90,7 +90,7 @@ impl<T: ReconcileItem> ReconcileSource for ReconcileStore<T> {
     }
 
     fn partition(&self, bounds: Self::Bounds, count: usize) -> Vec<Self::Bounds> {
-        if let Some(parts) = T::partition_domain(bounds.clone(), count) {
+        if let Some(parts) = T::partition_domain_hot(bounds.clone(), count, self.config.hot_tail) {
             return parts;
         }
         let n = self.items.count_range(&bounds.a, &bounds.b);
@@ -119,7 +119,7 @@ impl ReconcileStore<SyncId> {
 mod tests {
     use super::*;
     use crate::id::SyncId;
-    use crate::partition::{partition_by_items, partition_range};
+    use crate::partition::{partition_by_items, partition_range, partition_range_with_hot};
 
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct Key(u64);
@@ -265,5 +265,43 @@ mod tests {
             ReconcileSource::partition(&s, hash_bounds, 8),
             partition_range(hash_bounds, 8)
         );
+    }
+
+    #[test]
+    fn syncid_hot_tail_tiles_cold_prefix_and_hot_window() {
+        let cfg = ReconcileConfig {
+            hot_tail: Some(100),
+            partitions: 8,
+            ..Default::default()
+        };
+        let s = ReconcileStore::new(cfg).unwrap();
+        let bounds = RangeBounds::window(0, 1000).unwrap();
+        let parts = ReconcileSource::partition(&s, bounds, 8);
+        assert_eq!(parts, partition_range_with_hot(bounds, 8, Some(100)));
+        assert_eq!(parts.len(), 9);
+        assert_eq!(parts[0].a, bounds.a);
+        assert_eq!(parts[0].b, SyncId::min_at(900));
+        assert_eq!(parts[8].b, bounds.b);
+        for w in parts.windows(2) {
+            assert_eq!(w[0].b, w[1].a);
+        }
+        let hot = RangeBounds::window(900, 1000).unwrap();
+        assert_eq!(&parts[1..], partition_range(hot, 8).as_slice());
+    }
+
+    #[test]
+    fn generic_partition_ignores_hot_tail() {
+        let cfg = ReconcileConfig {
+            hot_tail: Some(100),
+            ..Default::default()
+        };
+        let mut s = ReconcileStore::new(cfg).unwrap();
+        let local: Vec<_> = (1..=8).map(|i| Key(i * 10)).collect();
+        for k in &local {
+            s.insert(k.clone()).unwrap();
+        }
+        let bounds = RangeBounds::new(Key(0), Key(100)).unwrap();
+        let parts = ReconcileSource::partition(&s, bounds.clone(), 4);
+        assert_eq!(parts, partition_by_items(bounds, &local, 4));
     }
 }

@@ -3,7 +3,7 @@
 use crate::bounds::RangeBounds;
 use crate::fingerprint::xor_into;
 use crate::id::SyncId;
-use crate::partition::{partition_by_items, partition_range};
+use crate::partition::{partition_by_items, partition_range, partition_range_with_hot};
 use std::fmt::Debug;
 
 /// Element of a reconcilable set.
@@ -65,6 +65,15 @@ pub trait ReconcileItem: Clone + Ord + Debug {
     ) -> Option<Vec<RangeBounds<Self>>> {
         None
     }
+
+    /// Domain split that may isolate a recency window. Default is [`partition_domain`].
+    fn partition_domain_hot(
+        bounds: RangeBounds<Self>,
+        count: usize,
+        _hot_tail: Option<u64>,
+    ) -> Option<Vec<RangeBounds<Self>>> {
+        Self::partition_domain(bounds, count)
+    }
 }
 
 impl ReconcileItem for SyncId {
@@ -86,5 +95,13 @@ impl ReconcileItem for SyncId {
 
     fn partition_domain(bounds: RangeBounds<Self>, count: usize) -> Option<Vec<RangeBounds<Self>>> {
         Some(partition_range(bounds, count))
+    }
+
+    fn partition_domain_hot(
+        bounds: RangeBounds<Self>,
+        count: usize,
+        hot_tail: Option<u64>,
+    ) -> Option<Vec<RangeBounds<Self>>> {
+        Some(partition_range_with_hot(bounds, count, hot_tail))
     }
 }

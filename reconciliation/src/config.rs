@@ -20,6 +20,9 @@ pub struct ReconcileConfig {
     pub max_items: usize,
     /// Maximum `step` calls in one session.
     pub max_rounds: usize,
+    /// Recency window (time units) for [`crate::SyncId`] splits. `None` keeps
+    /// equal-time partitioning.
+    pub hot_tail: Option<u64>,
 }
 
 impl Default for ReconcileConfig {
@@ -29,12 +32,13 @@ impl Default for ReconcileConfig {
             partitions: DEFAULT_PARTITIONS,
             max_items: DEFAULT_MAX_ITEMS,
             max_rounds: DEFAULT_MAX_ROUNDS,
+            hot_tail: None,
         }
     }
 }
 
 impl ReconcileConfig {
-    /// Reject `partitions < 2`, zero threshold, zero caps.
+    /// Reject `partitions < 2`, zero threshold, zero caps, `hot_tail = Some(0)`.
     pub fn validate(&self) -> Result<()> {
         if self.partitions < 2 {
             return Err(ReconcileError::InvalidConfig(
@@ -56,6 +60,11 @@ impl ReconcileConfig {
                 "max_rounds must be greater than 0",
             ));
         }
+        if self.hot_tail == Some(0) {
+            return Err(ReconcileError::InvalidConfig(
+                "hot_tail must be greater than 0",
+            ));
+        }
         Ok(())
     }
 }
@@ -73,6 +82,18 @@ mod tests {
     fn rejects_bad_partitions() {
         let c = ReconcileConfig {
             partitions: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(ReconcileError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_hot_tail() {
+        let c = ReconcileConfig {
+            hot_tail: Some(0),
             ..Default::default()
         };
         assert!(matches!(
