@@ -1,8 +1,13 @@
 //! Range-based set reconciliation ([LIP-182][lip] algorithm, Rust API).
 //!
-//! Two peers holding ordered [`SyncId`] sets exchange [`ReconcileMessage`]s
-//! until they agree on the symmetric difference. This is **not** private set
-//! intersection — see the `psi` crate. There is no transfer protocol.
+//! Two peers holding ordered sets of [`ReconcileItem`]s exchange
+//! [`ReconcileMessage`]s until they agree on the symmetric difference.
+//! The set requirement is a total order; fingerprints test range equality
+//! without listing items. [`SyncId`] is the LIP-182 item type (time then
+//! hash) and the default type parameter.
+//!
+//! This is **not** private set intersection — see the `psi` crate. There
+//! is no transfer protocol.
 //!
 //! [lip]: https://lip.logos.co/messaging/core/raw/sync.html
 //!
@@ -72,10 +77,47 @@
 //! # Ok::<(), reconciliation::ReconcileError>(())
 //! ```
 //!
+//! Any [`ReconcileItem`] works. This newtype uses a `u64` fingerprint:
+//!
+//! ```
+//! use reconciliation::{
+//!     RangeBounds, Reconcile, ReconcileItem, ReconcileStep, ReconcileStore,
+//! };
+//!
+//! #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+//! struct Key(u64);
+//!
+//! impl ReconcileItem for Key {
+//!     type Fingerprint = u64;
+//!     fn empty_fingerprint() -> u64 { 0 }
+//!     fn accumulate(fp: &mut u64, item: &Self) { *fp ^= item.0; }
+//! }
+//!
+//! let mut alice = ReconcileStore::new(Default::default())?;
+//! let mut bob = ReconcileStore::new(Default::default())?;
+//! alice.insert(Key(1))?;
+//! alice.insert(Key(2))?;
+//! bob.insert(Key(1))?;
+//!
+//! let bounds = RangeBounds::new(Key(0), Key(10))?;
+//! let (alice_sess, first) = Reconcile::initiate(&alice, bounds)?;
+//! let bob_sess = Reconcile::respond(&bob);
+//! match bob_sess.step(first)? {
+//!     ReconcileStep::Done { result, .. } => {
+//!         assert_eq!(result.to_recv.len(), 1);
+//!     }
+//!     ReconcileStep::Next { message, next } => {
+//!         let _ = (alice_sess.step(message)?, next);
+//!     }
+//! }
+//! # Ok::<(), reconciliation::ReconcileError>(())
+//! ```
+//!
 //! ## Threat model
 //!
-//! Peers are trusted to follow the protocol. Fingerprints leak the XOR of
-//! hashes in a range. Item sets leak every [`SyncId`] in a differing range.
+//! Peers are trusted to follow the protocol. Fingerprints leak a digest of
+//! items in a range (XOR of hashes for [`SyncId`]). Item sets leak every
+//! identifier in a differing range.
 //! A peer can Skip or invent IDs. Use an authenticated channel.
 //!
 //! ## Codec
@@ -87,6 +129,7 @@ pub use bounds::RangeBounds;
 pub use config::ReconcileConfig;
 pub use error::{ReconcileError, Result};
 pub use id::{SyncId, EMPTY_HASH, FULL_HASH};
+pub use item::ReconcileItem;
 pub use range::{ItemSet, Range, ReconcileMessage};
 pub use session::{Reconcile, ReconcileResult, ReconcileStep};
 pub use state::{ReconcileState, Running};
@@ -99,6 +142,7 @@ mod config;
 mod error;
 mod fingerprint;
 mod id;
+mod item;
 mod partition;
 mod process;
 mod range;

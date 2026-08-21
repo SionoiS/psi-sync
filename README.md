@@ -65,9 +65,9 @@ Honest-but-curious peers. The channel **must** be authenticated, confidential, a
 
 ## `reconciliation` (LIP-182 algorithm)
 
-Range-based set reconciliation. Items are `SyncId { timestamp, hash }`, ordered by time then hash. The session is type-state (`Reconcile<Running>`), same idea as `PsiProtocol<S>`: `step` consumes `self`.
+Range-based set reconciliation over any totally ordered item type (`ReconcileItem`). The session is type-state (`Reconcile<Running>`), same idea as `PsiProtocol<S>`: `step` consumes `self`. Type parameters default to `SyncId { timestamp, hash }`, the LIP-182 identifier (ordered by time then hash, XOR-of-hashes fingerprint, time/hash-space splits). Other types need only `Ord` plus a fingerprint; they split ranges using local item values as cut points.
 
-This crate implements **reconciliation only**, not a transfer protocol and not Waku message hashing (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself.
+This crate implements **reconciliation only**, not a transfer protocol and not Waku message hashing (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself. `codec`, `RangeBounds::window`, and `prune_before` are `SyncId`-specific.
 
 ### Flow
 
@@ -102,7 +102,7 @@ match b.step(first)? {
 
 ### Reconciliation threat model
 
-Peers are trusted to follow the protocol. Fingerprints leak the XOR of hashes in a range. Item sets leak every `SyncId` in a differing range. A peer can Skip or invent IDs. Prefer an authenticated channel.
+Peers are trusted to follow the protocol. Fingerprints leak a digest of items in a range (XOR of hashes for `SyncId`). Item sets leak every identifier in a differing range. A peer can Skip or invent IDs. Prefer an authenticated channel.
 
 ---
 

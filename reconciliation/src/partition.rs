@@ -1,7 +1,56 @@
-//! Time and hash-space partitioning of a [`RangeBounds`].
+//! Range partitioning: item-index (any [`Ord`]) and LIP-182 domain splits.
 
 use crate::bounds::RangeBounds;
 use crate::id::SyncId;
+
+/// Split `[bounds.a, bounds.b)` using `local` item values as cut points.
+///
+/// The incoming first/last bounds are preserved. Interior cuts are item
+/// values, so this needs only a total order. Returns an empty vec when
+/// fewer than two parts can be formed (caller should send an item set).
+pub fn partition_by_items<T: Clone + Ord>(
+    bounds: RangeBounds<T>,
+    local: &[T],
+    count: usize,
+) -> Vec<RangeBounds<T>> {
+    if count < 2 || local.len() < 2 {
+        return Vec::new();
+    }
+
+    let n = local.len();
+    let mut cuts = Vec::with_capacity(count + 1);
+    cuts.push(0);
+    for i in 1..count {
+        let idx = n * i / count;
+        if idx > *cuts.last().unwrap() && idx < n {
+            cuts.push(idx);
+        }
+    }
+    cuts.push(n);
+    if cuts.len() < 3 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(cuts.len() - 1);
+    for w in cuts.windows(2) {
+        let start = w[0];
+        let end = w[1];
+        let a = if start == 0 {
+            bounds.a.clone()
+        } else {
+            local[start].clone()
+        };
+        let b = if end == n {
+            bounds.b.clone()
+        } else {
+            local[end].clone()
+        };
+        if a < b {
+            out.push(RangeBounds { a, b });
+        }
+    }
+    out
+}
 
 /// Split `bounds` into subranges.
 ///
@@ -10,7 +59,7 @@ use crate::id::SyncId;
 /// - If `2 <= Δt < count`, time-split into `Δt` 1-unit slices.
 /// - If `Δt == 1`, two slices at the 1-unit cut.
 /// - If timestamps are equal, N-way split of the hash interval.
-pub fn partition_range(bounds: RangeBounds, count: usize) -> Vec<RangeBounds> {
+pub fn partition_range(bounds: RangeBounds<SyncId>, count: usize) -> Vec<RangeBounds<SyncId>> {
     debug_assert!(count >= 2);
     let dt = bounds.b.timestamp.saturating_sub(bounds.a.timestamp);
     if dt >= count as u64 {
@@ -26,7 +75,7 @@ pub fn partition_range(bounds: RangeBounds, count: usize) -> Vec<RangeBounds> {
 }
 
 /// N-way split of `[a.timestamp, b.timestamp)`. First/last hashes preserved.
-pub fn partition_time(bounds: RangeBounds, count: usize) -> Vec<RangeBounds> {
+pub fn partition_time(bounds: RangeBounds<SyncId>, count: usize) -> Vec<RangeBounds<SyncId>> {
     let total = bounds.b.timestamp.saturating_sub(bounds.a.timestamp);
     if count < 2 || total < count as u64 {
         return Vec::new();
@@ -60,7 +109,7 @@ pub fn partition_time(bounds: RangeBounds, count: usize) -> Vec<RangeBounds> {
     out
 }
 
-fn partition_one_tick(bounds: RangeBounds) -> Vec<RangeBounds> {
+fn partition_one_tick(bounds: RangeBounds<SyncId>) -> Vec<RangeBounds<SyncId>> {
     let mid = SyncId::min_at(bounds.a.timestamp.saturating_add(1));
     let mut out = Vec::new();
     if bounds.a < mid {
@@ -82,7 +131,7 @@ fn partition_one_tick(bounds: RangeBounds) -> Vec<RangeBounds> {
 }
 
 /// Split `[a.hash, b.hash)` as big-endian integers. Timestamps stay equal.
-pub fn partition_hash(bounds: RangeBounds, count: usize) -> Vec<RangeBounds> {
+pub fn partition_hash(bounds: RangeBounds<SyncId>, count: usize) -> Vec<RangeBounds<SyncId>> {
     if count < 2 || bounds.a.timestamp != bounds.b.timestamp || bounds.a.hash >= bounds.b.hash {
         return Vec::new();
     }
@@ -294,5 +343,29 @@ mod tests {
         let parts = partition_range(bounds, 8);
         assert_eq!(parts.len(), 8);
         assert!(parts.iter().any(|p| p.a.timestamp != p.b.timestamp));
+    }
+
+    #[test]
+    fn item_partition_tiles_and_uses_values_as_cuts() {
+        let bounds = RangeBounds::new(0u64, 100).unwrap();
+        let local = [10u64, 20, 30, 40, 50, 60, 70, 80];
+        let parts = partition_by_items(bounds, &local, 4);
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0].a, 0);
+        assert_eq!(parts[3].b, 100);
+        for w in parts.windows(2) {
+            assert_eq!(w[0].b, w[1].a);
+        }
+        // 8 items / 4 = 2 per part; interior cuts are local[2], [4], [6].
+        assert_eq!(parts[0].b, 30);
+        assert_eq!(parts[1].b, 50);
+        assert_eq!(parts[2].b, 70);
+    }
+
+    #[test]
+    fn item_partition_too_small_is_empty() {
+        let bounds = RangeBounds::new(0u64, 10).unwrap();
+        assert!(partition_by_items(bounds, &[], 4).is_empty());
+        assert!(partition_by_items(bounds, &[1], 4).is_empty());
     }
 }

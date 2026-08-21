@@ -1,23 +1,22 @@
 //! Per-message processing (LIP-182 reconciliation heuristic).
 
 use crate::bounds::RangeBounds;
-use crate::id::SyncId;
-use crate::partition::partition_range;
+use crate::item::ReconcileItem;
 use crate::range::{merge_skips, ItemSet, Range, ReconcileMessage};
 use crate::store::ReconcileStore;
 
 /// Result of processing one incoming message.
-pub(crate) struct ProcessOutput {
-    pub reply: ReconcileMessage,
-    pub to_send: Vec<SyncId>,
-    pub to_recv: Vec<SyncId>,
+pub(crate) struct ProcessOutput<T: ReconcileItem> {
+    pub reply: ReconcileMessage<T>,
+    pub to_send: Vec<T>,
+    pub to_recv: Vec<T>,
 }
 
 /// Process `incoming` against `store`.
-pub(crate) fn process_payload(
-    store: &ReconcileStore,
-    incoming: &ReconcileMessage,
-) -> ProcessOutput {
+pub(crate) fn process_payload<T: ReconcileItem>(
+    store: &ReconcileStore<T>,
+    incoming: &ReconcileMessage<T>,
+) -> ProcessOutput<T> {
     let mut reply_ranges = Vec::new();
     let mut to_send = Vec::new();
     let mut to_recv = Vec::new();
@@ -27,7 +26,7 @@ pub(crate) fn process_payload(
     for range in &incoming.ranges {
         match range {
             Range::Skip { bounds } => {
-                reply_ranges.push(Range::skip(*bounds));
+                reply_ranges.push(Range::skip(bounds.clone()));
             }
             Range::Fingerprint {
                 bounds,
@@ -35,8 +34,8 @@ pub(crate) fn process_payload(
             } => {
                 process_fingerprint(
                     store,
-                    *bounds,
-                    *fingerprint,
+                    bounds.clone(),
+                    fingerprint.clone(),
                     threshold,
                     partitions,
                     &mut reply_ranges,
@@ -45,7 +44,7 @@ pub(crate) fn process_payload(
             Range::Items { bounds, set } => {
                 process_item_set(
                     store,
-                    *bounds,
+                    bounds.clone(),
                     set,
                     &mut to_send,
                     &mut to_recv,
@@ -72,21 +71,21 @@ pub(crate) fn process_payload(
     }
 }
 
-fn process_fingerprint(
-    store: &ReconcileStore,
-    bounds: RangeBounds,
-    theirs: [u8; 32],
+fn process_fingerprint<T: ReconcileItem>(
+    store: &ReconcileStore<T>,
+    bounds: RangeBounds<T>,
+    theirs: T::Fingerprint,
     threshold: usize,
     partitions: usize,
-    out: &mut Vec<Range>,
+    out: &mut Vec<Range<T>>,
 ) {
-    let ours = store.fingerprint(bounds);
+    let ours = store.fingerprint(bounds.clone());
     if ours == theirs {
         out.push(Range::skip(bounds));
         return;
     }
 
-    let local = store.slice(bounds);
+    let local = store.slice(bounds.clone());
     if local.len() <= threshold {
         out.push(Range::item_set(
             bounds,
@@ -98,7 +97,7 @@ fn process_fingerprint(
         return;
     }
 
-    let parts = partition_range(bounds, partitions);
+    let parts = T::partition(bounds.clone(), local, partitions);
     if parts.is_empty() {
         out.push(Range::item_set(
             bounds,
@@ -111,7 +110,7 @@ fn process_fingerprint(
     }
 
     for part in parts {
-        let slice = store.slice(part);
+        let slice = store.slice(part.clone());
         if slice.len() <= threshold {
             out.push(Range::item_set(
                 part,
@@ -121,30 +120,30 @@ fn process_fingerprint(
                 },
             ));
         } else {
-            out.push(Range::fingerprint(part, store.fingerprint(part)));
+            out.push(Range::fingerprint(part.clone(), store.fingerprint(part)));
         }
     }
 }
 
-fn process_item_set(
-    store: &ReconcileStore,
-    bounds: RangeBounds,
-    theirs: &ItemSet,
-    to_send: &mut Vec<SyncId>,
-    to_recv: &mut Vec<SyncId>,
-    out: &mut Vec<Range>,
+fn process_item_set<T: ReconcileItem>(
+    store: &ReconcileStore<T>,
+    bounds: RangeBounds<T>,
+    theirs: &ItemSet<T>,
+    to_send: &mut Vec<T>,
+    to_recv: &mut Vec<T>,
+    out: &mut Vec<Range<T>>,
 ) {
-    let ours = store.slice(bounds);
+    let ours = store.slice(bounds.clone());
     let mut i = 0;
     let mut j = 0;
     while i < theirs.elements.len() && j < ours.len() {
         match theirs.elements[i].cmp(&ours[j]) {
             std::cmp::Ordering::Less => {
-                to_recv.push(theirs.elements[i]);
+                to_recv.push(theirs.elements[i].clone());
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                to_send.push(ours[j]);
+                to_send.push(ours[j].clone());
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
@@ -154,11 +153,11 @@ fn process_item_set(
         }
     }
     while i < theirs.elements.len() {
-        to_recv.push(theirs.elements[i]);
+        to_recv.push(theirs.elements[i].clone());
         i += 1;
     }
     while j < ours.len() {
-        to_send.push(ours[j]);
+        to_send.push(ours[j].clone());
         j += 1;
     }
 

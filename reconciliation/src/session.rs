@@ -2,33 +2,35 @@
 
 use crate::bounds::RangeBounds;
 use crate::error::{ReconcileError, Result};
+use crate::id::SyncId;
+use crate::item::ReconcileItem;
 use crate::process::process_payload;
 use crate::range::{Range, ReconcileMessage};
 use crate::state::{ReconcileState, Running};
 use crate::store::ReconcileStore;
-use crate::SyncId;
+use std::collections::BTreeSet;
 
 /// Symmetric difference accumulated over a session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ReconcileResult {
+pub struct ReconcileResult<T = SyncId> {
     /// Present locally, missing remotely.
-    pub to_send: Vec<SyncId>,
+    pub to_send: Vec<T>,
     /// Present remotely, missing locally.
-    pub to_recv: Vec<SyncId>,
+    pub to_recv: Vec<T>,
 }
 
 /// Outcome of [`Reconcile::step`].
 #[derive(Debug)]
-pub enum ReconcileStep<'store> {
+pub enum ReconcileStep<'store, T: ReconcileItem = SyncId> {
     /// Send `message` and continue with `next`.
     Next {
-        next: Reconcile<'store, Running>,
-        message: ReconcileMessage,
+        next: Reconcile<'store, Running, T>,
+        message: ReconcileMessage<T>,
     },
     /// Session over. Send `farewell` if this side produced the empty closer.
     Done {
-        result: ReconcileResult,
-        farewell: Option<ReconcileMessage>,
+        result: ReconcileResult<T>,
+        farewell: Option<ReconcileMessage<T>>,
     },
 }
 
@@ -36,46 +38,53 @@ pub enum ReconcileStep<'store> {
 ///
 /// Construct with [`Reconcile::initiate`] or [`Reconcile::respond`]. Only
 /// [`Reconcile<Running>`] has [`step`](Reconcile::step).
-pub struct Reconcile<'store, S: ReconcileState> {
-    store: &'store ReconcileStore,
+pub struct Reconcile<'store, S: ReconcileState, T: ReconcileItem = SyncId> {
+    store: &'store ReconcileStore<T>,
     state: S,
+    to_send: BTreeSet<T>,
+    to_recv: BTreeSet<T>,
 }
 
-impl<S: ReconcileState> std::fmt::Debug for Reconcile<'_, S> {
+impl<S: ReconcileState, T: ReconcileItem> std::fmt::Debug for Reconcile<'_, S, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reconcile").finish_non_exhaustive()
     }
 }
 
-impl<'store> Reconcile<'store, Running> {
+impl<'store, T: ReconcileItem> Reconcile<'store, Running, T> {
     /// Start as initiator: one Fingerprint over `bounds`.
     pub fn initiate(
-        store: &'store ReconcileStore,
-        bounds: RangeBounds,
-    ) -> Result<(Self, ReconcileMessage)> {
+        store: &'store ReconcileStore<T>,
+        bounds: RangeBounds<T>,
+    ) -> Result<(Self, ReconcileMessage<T>)> {
         if bounds.a >= bounds.b {
             return Err(ReconcileError::InvalidBounds);
         }
         let session = Self {
             store,
             state: Running::new(),
+            to_send: BTreeSet::new(),
+            to_recv: BTreeSet::new(),
         };
+        let fp = store.fingerprint(bounds.clone());
         let message = ReconcileMessage {
-            ranges: vec![Range::fingerprint(bounds, store.fingerprint(bounds))],
+            ranges: vec![Range::fingerprint(bounds, fp)],
         };
         Ok((session, message))
     }
 
     /// Start as responder. The first [`step`](Self::step) consumes the initiator message.
-    pub fn respond(store: &'store ReconcileStore) -> Self {
+    pub fn respond(store: &'store ReconcileStore<T>) -> Self {
         Self {
             store,
             state: Running::new(),
+            to_send: BTreeSet::new(),
+            to_recv: BTreeSet::new(),
         }
     }
 
     /// Process one incoming message. Consumes `self`.
-    pub fn step(mut self, incoming: ReconcileMessage) -> Result<ReconcileStep<'store>> {
+    pub fn step(mut self, incoming: ReconcileMessage<T>) -> Result<ReconcileStep<'store, T>> {
         if incoming.is_empty() {
             return Ok(ReconcileStep::Done {
                 result: self.into_result(),
@@ -91,8 +100,8 @@ impl<'store> Reconcile<'store, Running> {
         }
 
         let out = process_payload(self.store, &incoming);
-        self.state.to_send.extend(out.to_send);
-        self.state.to_recv.extend(out.to_recv);
+        self.to_send.extend(out.to_send);
+        self.to_recv.extend(out.to_recv);
 
         if out.reply.is_empty() {
             return Ok(ReconcileStep::Done {
@@ -107,32 +116,32 @@ impl<'store> Reconcile<'store, Running> {
         })
     }
 
-    fn into_result(self) -> ReconcileResult {
+    fn into_result(self) -> ReconcileResult<T> {
         ReconcileResult {
-            to_send: self.state.to_send.into_iter().collect(),
-            to_recv: self.state.to_recv.into_iter().collect(),
+            to_send: self.to_send.into_iter().collect(),
+            to_recv: self.to_recv.into_iter().collect(),
         }
     }
 }
 
 /// Drive two sessions to completion over an in-memory channel.
 #[cfg(test)]
-pub(crate) fn run_pair(
-    alice_store: &ReconcileStore,
-    bob_store: &ReconcileStore,
-    bounds: RangeBounds,
-) -> Result<(ReconcileResult, ReconcileResult)> {
+pub(crate) fn run_pair<T: ReconcileItem>(
+    alice_store: &ReconcileStore<T>,
+    bob_store: &ReconcileStore<T>,
+    bounds: RangeBounds<T>,
+) -> Result<(ReconcileResult<T>, ReconcileResult<T>)> {
     let (alice, first) = Reconcile::initiate(alice_store, bounds)?;
     let bob = Reconcile::respond(bob_store);
     drive(alice, bob, first)
 }
 
 #[cfg(test)]
-fn drive<'a>(
-    mut alice: Reconcile<'a, Running>,
-    mut bob: Reconcile<'a, Running>,
-    mut incoming: ReconcileMessage,
-) -> Result<(ReconcileResult, ReconcileResult)> {
+fn drive<'a, T: ReconcileItem>(
+    mut alice: Reconcile<'a, Running, T>,
+    mut bob: Reconcile<'a, Running, T>,
+    mut incoming: ReconcileMessage<T>,
+) -> Result<(ReconcileResult<T>, ReconcileResult<T>)> {
     loop {
         match bob.step(incoming)? {
             ReconcileStep::Next { next, message } => {
@@ -157,10 +166,10 @@ fn drive<'a>(
 }
 
 #[cfg(test)]
-fn finish_peer(
-    session: Reconcile<'_, Running>,
-    farewell: Option<ReconcileMessage>,
-) -> Result<ReconcileResult> {
+fn finish_peer<T: ReconcileItem>(
+    session: Reconcile<'_, Running, T>,
+    farewell: Option<ReconcileMessage<T>>,
+) -> Result<ReconcileResult<T>> {
     match farewell {
         None => match session.step(ReconcileMessage::empty())? {
             ReconcileStep::Done { result, .. } => Ok(result),
@@ -324,5 +333,114 @@ mod tests {
         };
         let err = next.step(fp).unwrap_err();
         assert!(matches!(err, ReconcileError::TooManyRounds { max: 1 }));
+    }
+}
+
+#[cfg(test)]
+mod generic_item_tests {
+    use super::*;
+    use crate::config::ReconcileConfig;
+    use crate::item::ReconcileItem;
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct Key(u64);
+
+    impl ReconcileItem for Key {
+        type Fingerprint = u64;
+
+        fn empty_fingerprint() -> u64 {
+            0
+        }
+
+        fn accumulate(fp: &mut u64, item: &Self) {
+            *fp ^= item.0;
+        }
+    }
+
+    fn store(ids: &[u64]) -> ReconcileStore<Key> {
+        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        for &n in ids {
+            s.insert(Key(n)).unwrap();
+        }
+        s
+    }
+
+    fn window() -> RangeBounds<Key> {
+        RangeBounds::new(Key(0), Key(1_000)).unwrap()
+    }
+
+    #[test]
+    fn identical_stores() {
+        let ids = [1, 2, 3];
+        let a = store(&ids);
+        let b = store(&ids);
+        let (ar, br) = run_pair(&a, &b, window()).unwrap();
+        assert!(ar.to_send.is_empty() && ar.to_recv.is_empty());
+        assert!(br.to_send.is_empty() && br.to_recv.is_empty());
+    }
+
+    #[test]
+    fn alice_only_extras() {
+        let alice = store(&[1, 2, 3]);
+        let bob = store(&[1]);
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
+        assert_eq!(ar.to_send, vec![Key(2), Key(3)]);
+        assert!(ar.to_recv.is_empty());
+        assert_eq!(br.to_recv, ar.to_send);
+        assert!(br.to_send.is_empty());
+    }
+
+    #[test]
+    fn bob_only_extras() {
+        let alice = store(&[1]);
+        let bob = store(&[1, 4]);
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
+        assert_eq!(ar.to_recv, vec![Key(4)]);
+        assert!(ar.to_send.is_empty());
+        assert_eq!(br.to_send, ar.to_recv);
+        assert!(br.to_recv.is_empty());
+    }
+
+    #[test]
+    fn both_sided_extras() {
+        let alice = store(&[1, 2]);
+        let bob = store(&[1, 3]);
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
+        assert_eq!(ar.to_send, br.to_recv);
+        assert_eq!(ar.to_recv, br.to_send);
+        assert_eq!(ar.to_send, vec![Key(2)]);
+        assert_eq!(ar.to_recv, vec![Key(3)]);
+    }
+
+    #[test]
+    fn empty_vs_nonempty() {
+        let alice = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let bob = store(&[5]);
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
+        assert!(ar.to_send.is_empty());
+        assert_eq!(ar.to_recv, vec![Key(5)]);
+        assert_eq!(br.to_send, ar.to_recv);
+        assert!(br.to_recv.is_empty());
+    }
+
+    #[test]
+    fn item_partition_when_above_threshold() {
+        let cfg = ReconcileConfig {
+            threshold: 2,
+            partitions: 4,
+            ..Default::default()
+        };
+        let mut alice = ReconcileStore::new(cfg).unwrap();
+        let mut bob = ReconcileStore::new(cfg).unwrap();
+        for n in 1..=20u64 {
+            alice.insert(Key(n)).unwrap();
+            if n % 2 == 0 {
+                bob.insert(Key(n)).unwrap();
+            }
+        }
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
+        assert_eq!(ar.to_send.len(), 10);
+        assert!(ar.to_recv.is_empty());
+        assert_eq!(ar.to_send, br.to_recv);
     }
 }

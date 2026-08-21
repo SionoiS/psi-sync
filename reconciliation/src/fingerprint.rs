@@ -8,6 +8,7 @@ pub fn xor_into(acc: &mut [u8; 32], hash: &[u8; 32]) {
 }
 
 /// XOR a sequence of 32-byte hashes. Empty input yields `[0; 32]`.
+#[cfg(test)]
 pub fn xor_slice<'a, I>(hashes: I) -> [u8; 32]
 where
     I: IntoIterator<Item = &'a [u8; 32]>,

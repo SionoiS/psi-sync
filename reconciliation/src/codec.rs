@@ -15,7 +15,7 @@ pub struct Error(pub String);
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Encode a message. Empty `ranges` is a single `0` byte.
-pub fn encode(message: &ReconcileMessage) -> Vec<u8> {
+pub fn encode(message: &ReconcileMessage<SyncId>) -> Vec<u8> {
     if message.ranges.is_empty() {
         return vec![0];
     }
@@ -56,7 +56,7 @@ pub fn encode(message: &ReconcileMessage) -> Vec<u8> {
 }
 
 /// Decode a message. A lone `0` is empty. Cluster/shards in the header are discarded.
-pub fn decode(bytes: &[u8]) -> Result<ReconcileMessage> {
+pub fn decode(bytes: &[u8]) -> Result<ReconcileMessage<SyncId>> {
     if bytes.is_empty() {
         return Err(Error("empty buffer".into()));
     }
@@ -129,7 +129,7 @@ pub fn decode(bytes: &[u8]) -> Result<ReconcileMessage> {
     Ok(ReconcileMessage { ranges })
 }
 
-fn write_item_set(out: &mut Vec<u8>, set: &ItemSet) {
+fn write_item_set(out: &mut Vec<u8>, set: &ItemSet<SyncId>) {
     write_uleb128(out, set.elements.len() as u64);
     let mut last_time = 0u64;
     for (i, id) in set.elements.iter().enumerate() {
@@ -144,7 +144,7 @@ fn write_item_set(out: &mut Vec<u8>, set: &ItemSet) {
     out.push(u8::from(set.reconciled));
 }
 
-fn read_item_set(bytes: &[u8], idx: &mut usize) -> Result<ItemSet> {
+fn read_item_set(bytes: &[u8], idx: &mut usize) -> Result<ItemSet<SyncId>> {
     let n = read_uleb128(bytes, idx)? as usize;
     let mut elements = Vec::with_capacity(n);
     let mut last_time = 0u64;

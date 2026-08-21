@@ -1,19 +1,19 @@
-//! Sorted in-memory store of [`SyncId`]s.
+//! Sorted in-memory store of reconcilable items.
 
 use crate::bounds::RangeBounds;
 use crate::config::ReconcileConfig;
 use crate::error::{ReconcileError, Result};
-use crate::fingerprint::xor_slice;
 use crate::id::{SyncId, EMPTY_HASH};
+use crate::item::ReconcileItem;
 
-/// Ordered set of [`SyncId`]s plus the reconciliation tunables.
+/// Ordered set of items plus the reconciliation tunables.
 #[derive(Clone, Debug)]
-pub struct ReconcileStore {
-    items: Vec<SyncId>,
+pub struct ReconcileStore<T: ReconcileItem = SyncId> {
+    items: Vec<T>,
     config: ReconcileConfig,
 }
 
-impl ReconcileStore {
+impl<T: ReconcileItem> ReconcileStore<T> {
     /// Empty store. Rejects an invalid [`ReconcileConfig`].
     pub fn new(config: ReconcileConfig) -> Result<Self> {
         config.validate()?;
@@ -29,7 +29,7 @@ impl ReconcileStore {
     }
 
     /// Insert `id`. Duplicates are ignored. Errors if `max_items` would be exceeded.
-    pub fn insert(&mut self, id: SyncId) -> Result<()> {
+    pub fn insert(&mut self, id: T) -> Result<()> {
         match self.items.binary_search(&id) {
             Ok(_) => Ok(()),
             Err(idx) => {
@@ -45,17 +45,6 @@ impl ReconcileStore {
         }
     }
 
-    /// Drop every item with `timestamp < timestamp`. Returns the number removed.
-    pub fn prune_before(&mut self, timestamp: u64) -> usize {
-        let bound = SyncId {
-            timestamp,
-            hash: EMPTY_HASH,
-        };
-        let idx = self.items.partition_point(|id| *id < bound);
-        self.items.drain(..idx);
-        idx
-    }
-
     /// Number of stored items.
     pub fn len(&self) -> usize {
         self.items.len()
@@ -67,15 +56,32 @@ impl ReconcileStore {
     }
 
     /// Items in `[bounds.a, bounds.b)`.
-    pub fn slice(&self, bounds: RangeBounds) -> &[SyncId] {
-        let start = self.items.partition_point(|id| *id < bounds.a);
-        let end = self.items.partition_point(|id| *id < bounds.b);
+    pub fn slice(&self, bounds: RangeBounds<T>) -> &[T] {
+        let start = self.items.partition_point(|id| id < &bounds.a);
+        let end = self.items.partition_point(|id| id < &bounds.b);
         &self.items[start..end]
     }
 
-    /// XOR of hashes of items in `bounds`. Empty slice → `[0; 32]`.
-    pub fn fingerprint(&self, bounds: RangeBounds) -> [u8; 32] {
-        xor_slice(self.slice(bounds).iter().map(|id| &id.hash))
+    /// Fingerprint of items in `bounds`. Empty slice → [`T::empty_fingerprint`].
+    pub fn fingerprint(&self, bounds: RangeBounds<T>) -> T::Fingerprint {
+        let mut fp = T::empty_fingerprint();
+        for item in self.slice(bounds) {
+            T::accumulate(&mut fp, item);
+        }
+        fp
+    }
+}
+
+impl ReconcileStore<SyncId> {
+    /// Drop every item with `timestamp < timestamp`. Returns the number removed.
+    pub fn prune_before(&mut self, timestamp: u64) -> usize {
+        let bound = SyncId {
+            timestamp,
+            hash: EMPTY_HASH,
+        };
+        let idx = self.items.partition_point(|id| *id < bound);
+        self.items.drain(..idx);
+        idx
     }
 }
 

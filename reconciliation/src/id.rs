@@ -1,4 +1,7 @@
-//! `SyncId` — the totally ordered item identifier (LIP-182).
+//! `SyncId` — LIP-182 item: timestamp then hash.
+//!
+//! Implements [`crate::ReconcileItem`] with an XOR-of-hashes fingerprint
+//! and time/hash-space partitioning.
 
 /// All-zero hash. Used as the lower-bound hash of a time cut.
 pub const EMPTY_HASH: [u8; 32] = [0u8; 32];
