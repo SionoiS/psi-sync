@@ -7,6 +7,18 @@ pub enum ReconcileError {
     #[error("set too large: {size} items exceeds maximum of {max}")]
     SetTooLarge { size: usize, max: usize },
 
+    /// Incoming item set was not strictly increasing.
+    #[error("unsorted item set")]
+    UnsortedItemSet,
+
+    /// An incoming item lay outside its range bounds.
+    #[error("item out of bounds")]
+    ItemOutOfBounds,
+
+    /// An incoming item set exceeded the configured maximum.
+    #[error("item set too large: {size} items exceeds maximum of {max}")]
+    ItemSetTooLarge { size: usize, max: usize },
+
     /// Range bounds were not strictly increasing (`a < b`).
     #[error("invalid range bounds: lower bound must be strictly less than upper bound")]
     InvalidBounds,

@@ -35,7 +35,10 @@ impl SyncId {
         }
     }
 
-    /// Upper corner of a time cut: `(timestamp, 0xff…ff)`.
+    /// Inclusive upper corner of a time cut: `(timestamp, 0xff…ff)`.
+    ///
+    /// Half-open `[min_at(t), max_at(t))` drops hash `0xff…ff` at `t`;
+    /// prefer `min_at(t.saturating_add(1))` as an exclusive end.
     pub fn max_at(timestamp: u64) -> Self {
         Self {
             timestamp,

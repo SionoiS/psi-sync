@@ -1,8 +1,9 @@
 //! Per-message processing (LIP-182 reconciliation heuristic).
 
+use crate::error::{ReconcileError, Result};
 use crate::item::ReconcileItem;
 use crate::range::{merge_skips, ItemSet, Range, ReconcileMessage};
-use crate::source::ReconcileSource;
+use crate::source::{ReconcileSource, SessionBounds};
 
 /// Result of processing one incoming message.
 pub(crate) struct ProcessOutput<T: ReconcileItem, B: crate::source::SessionBounds> {
@@ -15,7 +16,7 @@ pub(crate) struct ProcessOutput<T: ReconcileItem, B: crate::source::SessionBound
 pub(crate) fn process_payload<Src: ReconcileSource>(
     store: &Src,
     incoming: &ReconcileMessage<Src::Item, Src::Bounds>,
-) -> ProcessOutput<Src::Item, Src::Bounds> {
+) -> Result<ProcessOutput<Src::Item, Src::Bounds>> {
     let mut reply_ranges = Vec::new();
     let mut to_send = Vec::new();
     let mut to_recv = Vec::new();
@@ -48,7 +49,7 @@ pub(crate) fn process_payload<Src: ReconcileSource>(
                     &mut to_send,
                     &mut to_recv,
                     &mut reply_ranges,
-                );
+                )?;
             }
         }
     }
@@ -63,11 +64,11 @@ pub(crate) fn process_payload<Src: ReconcileSource>(
         }
     };
 
-    ProcessOutput {
+    Ok(ProcessOutput {
         reply,
         to_send,
         to_recv,
-    }
+    })
 }
 
 fn process_fingerprint<Src: ReconcileSource>(
@@ -129,7 +130,21 @@ fn process_item_set<Src: ReconcileSource>(
     to_send: &mut Vec<Src::Item>,
     to_recv: &mut Vec<Src::Item>,
     out: &mut Vec<Range<Src::Item, Src::Bounds>>,
-) {
+) -> Result<()> {
+    let max = store.config().max_items;
+    if theirs.elements.len() > max {
+        return Err(ReconcileError::ItemSetTooLarge {
+            size: theirs.elements.len(),
+            max,
+        });
+    }
+    if theirs.elements.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(ReconcileError::UnsortedItemSet);
+    }
+    if theirs.elements.iter().any(|item| !bounds.contains(item)) {
+        return Err(ReconcileError::ItemOutOfBounds);
+    }
+
     let ours = store.items(bounds.clone());
     let mut i = 0;
     let mut j = 0;
@@ -169,4 +184,5 @@ fn process_item_set<Src: ReconcileSource>(
     } else {
         out.push(Range::skip(bounds));
     }
+    Ok(())
 }

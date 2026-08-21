@@ -158,6 +158,11 @@ impl<K: Clone + Ord, T: Clone + Ord> RectBounds<K, T> {
     pub fn all_tags(item: RangeBounds<T>) -> Result<Self> {
         Self::new(TagRange::all(), item)
     }
+
+    /// True if `item` lies in the tag span and the item interval.
+    pub fn contains(&self, item: &Tagged<K, T>) -> bool {
+        self.tag.contains(&item.tag) && self.item.contains(&item.item)
+    }
 }
 
 impl<K, T> SessionBounds for RectBounds<K, T>
@@ -165,20 +170,26 @@ where
     K: Clone + Ord + std::fmt::Debug,
     T: Clone + Ord + std::fmt::Debug,
 {
+    type Item = Tagged<K, T>;
+
     fn is_valid(&self) -> bool {
         self.item.a < self.item.b && tag_range_nonempty(&self.tag)
     }
 
     fn merge_skip(&mut self, next: &Self) -> bool {
         if self.tag == next.tag {
-            self.item.b = next.item.b.clone();
-            return true;
+            return self.item.merge_skip(&next.item);
         }
-        if self.item == next.item {
+        if self.item == next.item && tag_spans_abut(&self.tag, &next.tag) {
             self.tag.end = next.tag.end.clone();
-            return true;
+            true
+        } else {
+            false
         }
-        false
+    }
+
+    fn contains(&self, item: &Tagged<K, T>) -> bool {
+        RectBounds::contains(self, item)
     }
 }
 
@@ -538,10 +549,21 @@ fn tag_range_nonempty<K: Ord>(r: &TagRange<K>) -> bool {
     }
 }
 
+fn tag_spans_abut<K: Ord>(left: &TagRange<K>, right: &TagRange<K>) -> bool {
+    match (&left.end, &right.start) {
+        (Bound::Excluded(a), Bound::Included(b)) => a == b,
+        (Bound::Included(a), Bound::Excluded(b)) => a == b,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::run_pair;
+    use crate::error::ReconcileError;
+    use crate::range::{ItemSet, Range, ReconcileMessage};
+    use crate::session::{run_pair, Reconcile};
+    use crate::source::SessionBounds;
     use crate::ReconcileConfig;
 
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -594,6 +616,70 @@ mod tests {
 
     fn window() -> RangeBounds<Key> {
         RangeBounds::new(Key(0), Key(1_000)).unwrap()
+    }
+
+    #[test]
+    fn rect_contains_tag_and_item() {
+        let b = RectBounds::topic(1, window()).unwrap();
+        assert!(b.contains(&Tagged::new(1, Key(1))));
+        assert!(!b.contains(&Tagged::new(2, Key(1))));
+        assert!(!b.contains(&Tagged::new(1, Key(2_000))));
+    }
+
+    #[test]
+    fn merge_skip_abutting_item_axis() {
+        let tag = TagRange::one(1u8);
+        let mut a =
+            RectBounds::new(tag.clone(), RangeBounds::new(Key(0), Key(10)).unwrap()).unwrap();
+        let b = RectBounds::new(tag, RangeBounds::new(Key(10), Key(20)).unwrap()).unwrap();
+        assert!(a.merge_skip(&b));
+        assert_eq!(a.item, RangeBounds::new(Key(0), Key(20)).unwrap());
+    }
+
+    #[test]
+    fn merge_skip_gap_item_axis() {
+        let tag = TagRange::one(1u8);
+        let mut a =
+            RectBounds::new(tag.clone(), RangeBounds::new(Key(0), Key(10)).unwrap()).unwrap();
+        let b = RectBounds::new(tag, RangeBounds::new(Key(20), Key(30)).unwrap()).unwrap();
+        assert!(!a.merge_skip(&b));
+        assert_eq!(a.item, RangeBounds::new(Key(0), Key(10)).unwrap());
+    }
+
+    #[test]
+    fn merge_skip_abutting_tag_span() {
+        let item = RangeBounds::new(Key(0), Key(10)).unwrap();
+        let mut a = RectBounds::new(TagRange::interval(1, 3).unwrap(), item.clone()).unwrap();
+        let b = RectBounds::new(TagRange::interval(3, 5).unwrap(), item).unwrap();
+        assert!(a.merge_skip(&b));
+        assert_eq!(a.tag, TagRange::interval(1, 5).unwrap());
+    }
+
+    #[test]
+    fn merge_skip_gap_tag_span() {
+        let item = RangeBounds::new(Key(0), Key(10)).unwrap();
+        let mut a = RectBounds::new(TagRange::interval(1, 3).unwrap(), item.clone()).unwrap();
+        let b = RectBounds::new(TagRange::interval(4, 5).unwrap(), item).unwrap();
+        assert!(!a.merge_skip(&b));
+        assert_eq!(a.tag, TagRange::interval(1, 3).unwrap());
+    }
+
+    #[test]
+    fn item_outside_rect_is_rejected() {
+        let alice = store(&[(1, 1)]);
+        let s = Reconcile::respond(&alice);
+        let bounds = RectBounds::topic(1, window()).unwrap();
+        let msg = ReconcileMessage {
+            ranges: vec![Range::item_set(
+                bounds,
+                ItemSet {
+                    elements: vec![Tagged::new(9, Key(1))],
+                    reconciled: false,
+                },
+            )],
+        };
+        let err = s.step(msg).unwrap_err();
+        assert_eq!(err, ReconcileError::ItemOutOfBounds);
     }
 
     #[test]

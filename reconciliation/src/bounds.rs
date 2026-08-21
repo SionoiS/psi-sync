@@ -34,13 +34,23 @@ impl<T: Ord> RangeBounds<T> {
 }
 
 impl<T: Clone + Ord + std::fmt::Debug> SessionBounds for RangeBounds<T> {
+    type Item = T;
+
     fn is_valid(&self) -> bool {
         self.a < self.b
     }
 
     fn merge_skip(&mut self, next: &Self) -> bool {
-        self.b = next.b.clone();
-        true
+        if self.b == next.a {
+            self.b = next.b.clone();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn contains(&self, item: &T) -> bool {
+        RangeBounds::contains(self, item)
     }
 }
 
@@ -55,6 +65,7 @@ impl RangeBounds<SyncId> {
 mod tests {
     use super::*;
     use crate::id::SyncId;
+    use crate::source::SessionBounds;
 
     #[test]
     fn rejects_equal_and_reversed() {
@@ -86,5 +97,21 @@ mod tests {
         assert!(bounds.contains(&9));
         assert!(!bounds.contains(&10));
         assert!(!bounds.contains(&2));
+    }
+
+    #[test]
+    fn merge_skip_abutting() {
+        let mut a = RangeBounds::window(0, 10).unwrap();
+        let b = RangeBounds::window(10, 20).unwrap();
+        assert!(a.merge_skip(&b));
+        assert_eq!(a, RangeBounds::window(0, 20).unwrap());
+    }
+
+    #[test]
+    fn merge_skip_non_adjacent() {
+        let mut a = RangeBounds::window(0, 10).unwrap();
+        let b = RangeBounds::window(20, 30).unwrap();
+        assert!(!a.merge_skip(&b));
+        assert_eq!(a, RangeBounds::window(0, 10).unwrap());
     }
 }

@@ -117,4 +117,14 @@ mod tests {
         assert_eq!(merged[0].bounds().b, SyncId::min_at(20));
         assert!(matches!(merged[1], Range::Fingerprint { .. }));
     }
+
+    #[test]
+    fn does_not_merge_non_adjacent_skips() {
+        let a = RangeBounds::window(0, 10).unwrap();
+        let b = RangeBounds::window(20, 30).unwrap();
+        let merged = merge_skips(vec![Range::<SyncId>::skip(a), Range::skip(b)]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].bounds(), a);
+        assert_eq!(merged[1].bounds(), b);
+    }
 }

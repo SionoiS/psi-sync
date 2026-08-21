@@ -103,7 +103,7 @@ impl<'store, Src: ReconcileSource> Reconcile<'store, Running, Src> {
             });
         }
 
-        let out = process_payload(self.store, &incoming);
+        let out = process_payload(self.store, &incoming)?;
         self.to_send.extend(out.to_send);
         self.to_recv.extend(out.to_recv);
 
@@ -196,7 +196,7 @@ mod tests {
     use crate::bounds::RangeBounds;
     use crate::config::ReconcileConfig;
     use crate::id::SyncId;
-    use crate::range::Range;
+    use crate::range::{ItemSet, Range};
 
     fn sid(t: u64, h0: u8) -> SyncId {
         let mut hash = [0u8; 32];
@@ -339,6 +339,60 @@ mod tests {
         };
         let err = next.step(fp).unwrap_err();
         assert!(matches!(err, ReconcileError::TooManyRounds { max: 1 }));
+    }
+
+    fn item_set_msg(elements: Vec<SyncId>) -> ReconcileMessage {
+        ReconcileMessage {
+            ranges: vec![Range::item_set(
+                window(),
+                ItemSet {
+                    elements,
+                    reconciled: false,
+                },
+            )],
+        }
+    }
+
+    #[test]
+    fn unsorted_item_set() {
+        let store = store(&[]);
+        let s = Reconcile::respond(&store);
+        let err = s
+            .step(item_set_msg(vec![sid(2, 2), sid(1, 1)]))
+            .unwrap_err();
+        assert_eq!(err, ReconcileError::UnsortedItemSet);
+    }
+
+    #[test]
+    fn duplicate_item_set_is_unsorted() {
+        let store = store(&[]);
+        let s = Reconcile::respond(&store);
+        let err = s
+            .step(item_set_msg(vec![sid(1, 1), sid(1, 1)]))
+            .unwrap_err();
+        assert_eq!(err, ReconcileError::UnsortedItemSet);
+    }
+
+    #[test]
+    fn item_outside_bounds() {
+        let store = store(&[]);
+        let s = Reconcile::respond(&store);
+        let err = s.step(item_set_msg(vec![sid(2_000, 1)])).unwrap_err();
+        assert_eq!(err, ReconcileError::ItemOutOfBounds);
+    }
+
+    #[test]
+    fn oversized_item_set() {
+        let cfg = ReconcileConfig {
+            max_items: 2,
+            ..Default::default()
+        };
+        let store = ReconcileStore::new(cfg).unwrap();
+        let s = Reconcile::respond(&store);
+        let err = s
+            .step(item_set_msg(vec![sid(1, 1), sid(2, 2), sid(3, 3)]))
+            .unwrap_err();
+        assert_eq!(err, ReconcileError::ItemSetTooLarge { size: 3, max: 2 });
     }
 }
 
