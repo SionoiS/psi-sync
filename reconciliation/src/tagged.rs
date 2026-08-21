@@ -6,7 +6,7 @@ use crate::error::{ReconcileError, Result};
 use crate::fingerprint::xor_into;
 use crate::id::{SyncId, EMPTY_HASH};
 use crate::item::ReconcileItem;
-use crate::partition::partition_by_items;
+use crate::partition::{partition_by_items, partition_by_nth};
 use crate::range_tree::RangeTree;
 use crate::source::{ReconcileSource, SessionBounds};
 use std::collections::BTreeSet;
@@ -358,20 +358,17 @@ where
     K: ReconcileItem<Fingerprint = T::Fingerprint>,
     T: ReconcileItem,
 {
-    let local = store.items(bounds.clone());
-    if count < 2 || local.len() < 2 {
+    if count < 2 {
         return Vec::new();
     }
 
     if bounds.tag.is_one() {
-        let items: Vec<T> = local.iter().map(|p| p.item.clone()).collect();
-        return T::partition(bounds.item.clone(), &items, count)
-            .into_iter()
-            .map(|item| RectBounds {
-                tag: bounds.tag.clone(),
-                item,
-            })
-            .collect();
+        return partition_one_tag(store, bounds, count);
+    }
+
+    let local = store.items(bounds.clone());
+    if local.len() < 2 {
+        return Vec::new();
     }
 
     let n_tags = distinct_count(local.iter().map(|p| &p.tag));
@@ -381,6 +378,42 @@ where
     } else {
         split_item_axis(&bounds, &local, count)
     }
+}
+
+fn partition_one_tag<T, K>(
+    store: &TaggedStore<T, K>,
+    bounds: RectBounds<K, T>,
+    count: usize,
+) -> Vec<RectBounds<K, T>>
+where
+    K: ReconcileItem<Fingerprint = T::Fingerprint>,
+    T: ReconcileItem,
+{
+    if let Some(parts) = T::partition_domain(bounds.item.clone(), count) {
+        return parts
+            .into_iter()
+            .map(|item| RectBounds {
+                tag: bounds.tag.clone(),
+                item,
+            })
+            .collect();
+    }
+    let Bound::Included(tag) = &bounds.tag.start else {
+        return Vec::new();
+    };
+    let n = store.count(bounds.clone());
+    partition_by_nth(bounds.item.clone(), n, count, |k| {
+        store
+            .tree
+            .nth_in_tag(tag, &bounds.item.a, &bounds.item.b, k)
+            .cloned()
+    })
+    .into_iter()
+    .map(|item| RectBounds {
+        tag: bounds.tag.clone(),
+        item,
+    })
+    .collect()
 }
 
 fn distinct_count<I, V>(iter: I) -> usize
@@ -691,5 +724,28 @@ mod tests {
         s.insert([2u8; 32], sid(3, 3)).unwrap();
         assert_eq!(s.prune_before(2), 1);
         assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn one_tag_partition_tiles_like_items() {
+        let mut s = TaggedStore::<Key, u8>::new(ReconcileConfig::default()).unwrap();
+        let tag = 1u8;
+        let local: Vec<_> = (1..=8).map(|i| Key(i * 10)).collect();
+        for k in &local {
+            s.insert(tag, k.clone()).unwrap();
+        }
+        let item_bounds = RangeBounds::new(Key(0), Key(100)).unwrap();
+        let bounds = RectBounds::topic(tag, item_bounds.clone()).unwrap();
+        let parts = ReconcileSource::partition(&s, bounds, 4);
+        let expect = partition_by_items(item_bounds, &local, 4);
+        assert_eq!(parts.len(), expect.len());
+        for (got, exp) in parts.iter().zip(expect.iter()) {
+            assert_eq!(got.tag, TagRange::one(tag));
+            assert_eq!(got.item, *exp);
+        }
+        assert_eq!(parts[0].item.b, Key(30));
+        assert_eq!(parts[1].item.b, Key(50));
+        assert_eq!(parts[2].item.b, Key(70));
+        assert_eq!(parts[3].item.b, Key(100));
     }
 }

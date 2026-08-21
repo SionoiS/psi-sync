@@ -41,9 +41,9 @@ pub trait ReconcileItem: Clone + Ord + Debug {
 
     /// Split `[bounds.a, bounds.b)` into at most `count` subranges.
     ///
-    /// The default uses `local` item values as cut points, which needs only
-    /// [`Ord`]. Types with a splittable domain (such as [`SyncId`]) may
-    /// override this.
+    /// The default uses [`Self::partition_domain`] when present, otherwise
+    /// `local` item values as cut points. Types with a splittable domain
+    /// (such as [`SyncId`]) override [`Self::partition_domain`].
     ///
     /// Return fewer than two parts to force an item-set fallback.
     fn partition(
@@ -51,7 +51,19 @@ pub trait ReconcileItem: Clone + Ord + Debug {
         local: &[Self],
         count: usize,
     ) -> Vec<RangeBounds<Self>> {
-        partition_by_items(bounds, local, count)
+        if let Some(parts) = Self::partition_domain(bounds.clone(), count) {
+            parts
+        } else {
+            partition_by_items(bounds, local, count)
+        }
+    }
+
+    /// Domain split of `bounds` (e.g. time/hash). `None` uses item-index cuts.
+    fn partition_domain(
+        _bounds: RangeBounds<Self>,
+        _count: usize,
+    ) -> Option<Vec<RangeBounds<Self>>> {
+        None
     }
 }
 
@@ -72,11 +84,7 @@ impl ReconcileItem for SyncId {
         out
     }
 
-    fn partition(
-        bounds: RangeBounds<Self>,
-        _local: &[Self],
-        count: usize,
-    ) -> Vec<RangeBounds<Self>> {
-        partition_range(bounds, count)
+    fn partition_domain(bounds: RangeBounds<Self>, count: usize) -> Option<Vec<RangeBounds<Self>>> {
+        Some(partition_range(bounds, count))
     }
 }

@@ -90,6 +90,26 @@ impl<T: ReconcileItem> MonoidTree<T> {
         count_range(self.root.as_deref(), lo, hi)
     }
 
+    /// n-th item in in-order (0-based).
+    pub(crate) fn nth(&self, n: usize) -> Option<&T> {
+        nth_node(self.root.as_deref(), n)
+    }
+
+    /// n-th item among those in `[lo, hi)` (0-based).
+    pub(crate) fn nth_in_range(&self, lo: &T, hi: &T, n: usize) -> Option<&T> {
+        if lo >= hi {
+            return None;
+        }
+        let rank = count_lt(self.root.as_deref(), lo);
+        let idx = rank.checked_add(n)?;
+        let item = self.nth(idx)?;
+        if item < hi {
+            Some(item)
+        } else {
+            None
+        }
+    }
+
     /// In-order items in `[lo, hi)`.
     pub(crate) fn iter_range(&self, lo: &T, hi: &T) -> RangeIter<'_, T> {
         RangeIter::new(self.root.as_deref(), lo, hi)
@@ -423,6 +443,34 @@ fn count_range<T: ReconcileItem>(t: Option<&Node<T>>, lo: &T, hi: &T) -> usize {
     count_left(init.left.as_deref(), lo) + 1 + count_right(init.right.as_deref(), hi)
 }
 
+fn nth_node<T: ReconcileItem>(mut t: Option<&Node<T>>, mut n: usize) -> Option<&T> {
+    while let Some(cur) = t {
+        let left = size(&cur.left);
+        if n < left {
+            t = cur.left.as_deref();
+        } else if n == left {
+            return Some(&cur.value);
+        } else {
+            n -= left + 1;
+            t = cur.right.as_deref();
+        }
+    }
+    None
+}
+
+fn count_lt<T: ReconcileItem>(mut t: Option<&Node<T>>, key: &T) -> usize {
+    let mut acc = 0usize;
+    while let Some(n) = t {
+        if n.value < *key {
+            acc += 1 + size(&n.left);
+            t = n.right.as_deref();
+        } else {
+            t = n.left.as_deref();
+        }
+    }
+    acc
+}
+
 pub struct RangeIter<'a, T: ReconcileItem> {
     stack: Vec<&'a Node<T>>,
     hi: T,
@@ -645,5 +693,51 @@ mod tests {
         t.assert_invariants();
         assert_eq!(t.len(), 200);
         assert_eq!(t.count_range(&sid(0, 0), &sid(200, 0)), 200);
+    }
+
+    #[test]
+    fn nth_matches_inorder() {
+        let mut t = MonoidTree::new();
+        let mut items = Vec::new();
+        for i in (0..20u8).rev() {
+            let id = sid(u64::from(i), i);
+            t.insert(id);
+            items.push(id);
+        }
+        items.sort();
+        t.assert_invariants();
+        for (i, id) in items.iter().enumerate() {
+            assert_eq!(t.nth(i), Some(id));
+        }
+        assert_eq!(t.nth(items.len()), None);
+        assert_eq!(t.nth(usize::MAX), None);
+        let empty = MonoidTree::<SyncId>::new();
+        assert_eq!(empty.nth(0), None);
+    }
+
+    #[test]
+    fn nth_in_range_matches_filtered_inorder() {
+        let mut t = MonoidTree::new();
+        for i in 0..32u8 {
+            t.insert(sid(u64::from(i), i));
+        }
+        t.assert_invariants();
+        let lo = sid(5, 0);
+        let hi = sid(20, 0);
+        let filtered: Vec<_> = t
+            .iter()
+            .filter(|id| **id >= lo && **id < hi)
+            .cloned()
+            .collect();
+        let via_range: Vec<_> = t.iter_range(&lo, &hi).cloned().collect();
+        assert_eq!(filtered, via_range);
+        for (i, id) in filtered.iter().enumerate() {
+            assert_eq!(t.nth_in_range(&lo, &hi, i), Some(id));
+        }
+        assert_eq!(t.nth_in_range(&lo, &hi, filtered.len()), None);
+        assert_eq!(t.nth_in_range(&lo, &lo, 0), None);
+        assert_eq!(t.nth_in_range(&sid(100, 0), &sid(200, 0), 0), None);
+        assert_eq!(t.nth_in_range(&sid(0, 0), &sid(1, 0), 0), Some(&sid(0, 0)));
+        assert_eq!(t.nth_in_range(&sid(0, 0), &sid(1, 0), 1), None);
     }
 }

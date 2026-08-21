@@ -124,6 +124,23 @@ where
         self.contains_point(tag, &yp)
     }
 
+    /// n-th item of `tag` in `[item_lo, item_hi)` (0-based).
+    pub(crate) fn nth_in_tag(&self, tag: &K, item_lo: &T, item_hi: &T, n: usize) -> Option<&T> {
+        let mut t = self.root.as_deref();
+        while let Some(node) = t {
+            match tag.cmp(&node.tag) {
+                std::cmp::Ordering::Equal => {
+                    let ylo = item_bound(item_lo);
+                    let yhi = item_bound(item_hi);
+                    return node.local.nth_in_range(&ylo, &yhi, n).map(|yp| &yp.item);
+                }
+                std::cmp::Ordering::Less => t = node.left.as_deref(),
+                std::cmp::Ordering::Greater => t = node.right.as_deref(),
+            }
+        }
+        None
+    }
+
     pub(crate) fn insert(&mut self, tag: K, item: T) -> bool {
         let yp = YPoint {
             item,

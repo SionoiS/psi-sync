@@ -13,11 +13,26 @@ pub fn partition_by_items<T: Clone + Ord>(
     local: &[T],
     count: usize,
 ) -> Vec<RangeBounds<T>> {
-    if count < 2 || local.len() < 2 {
+    partition_by_nth(bounds, local.len(), count, |k| local.get(k).cloned())
+}
+
+/// Same cut indices as [`partition_by_items`], via the k-th local item.
+///
+/// `n` is the number of items in the range. `nth(k)` is the k-th (0-based).
+pub fn partition_by_nth<T, F>(
+    bounds: RangeBounds<T>,
+    n: usize,
+    count: usize,
+    mut nth: F,
+) -> Vec<RangeBounds<T>>
+where
+    T: Clone + Ord,
+    F: FnMut(usize) -> Option<T>,
+{
+    if count < 2 || n < 2 {
         return Vec::new();
     }
 
-    let n = local.len();
     let mut cuts = Vec::with_capacity(count + 1);
     cuts.push(0);
     for i in 1..count {
@@ -38,12 +53,18 @@ pub fn partition_by_items<T: Clone + Ord>(
         let a = if start == 0 {
             bounds.a.clone()
         } else {
-            local[start].clone()
+            match nth(start) {
+                Some(v) => v,
+                None => return Vec::new(),
+            }
         };
         let b = if end == n {
             bounds.b.clone()
         } else {
-            local[end].clone()
+            match nth(end) {
+                Some(v) => v,
+                None => return Vec::new(),
+            }
         };
         if a < b {
             out.push(RangeBounds { a, b });
@@ -367,5 +388,14 @@ mod tests {
         let bounds = RangeBounds::new(0u64, 10).unwrap();
         assert!(partition_by_items(bounds, &[], 4).is_empty());
         assert!(partition_by_items(bounds, &[1], 4).is_empty());
+    }
+
+    #[test]
+    fn partition_by_nth_matches_slice() {
+        let bounds = RangeBounds::new(0u64, 100).unwrap();
+        let local = [10u64, 20, 30, 40, 50, 60, 70, 80];
+        let from_slice = partition_by_items(bounds, &local, 4);
+        let from_nth = partition_by_nth(bounds, local.len(), 4, |k| local.get(k).copied());
+        assert_eq!(from_slice, from_nth);
     }
 }

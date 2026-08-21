@@ -5,6 +5,7 @@ use crate::config::ReconcileConfig;
 use crate::error::{ReconcileError, Result};
 use crate::id::{SyncId, EMPTY_HASH};
 use crate::item::ReconcileItem;
+use crate::partition::partition_by_nth;
 use crate::source::ReconcileSource;
 use crate::tree::MonoidTree;
 
@@ -89,8 +90,13 @@ impl<T: ReconcileItem> ReconcileSource for ReconcileStore<T> {
     }
 
     fn partition(&self, bounds: Self::Bounds, count: usize) -> Vec<Self::Bounds> {
-        let local = self.items_vec(bounds.clone());
-        T::partition(bounds, &local, count)
+        if let Some(parts) = T::partition_domain(bounds.clone(), count) {
+            return parts;
+        }
+        let n = self.items.count_range(&bounds.a, &bounds.b);
+        partition_by_nth(bounds.clone(), n, count, |k| {
+            self.items.nth_in_range(&bounds.a, &bounds.b, k).cloned()
+        })
     }
 
     fn config(&self) -> &ReconcileConfig {
@@ -113,6 +119,23 @@ impl ReconcileStore<SyncId> {
 mod tests {
     use super::*;
     use crate::id::SyncId;
+    use crate::partition::{partition_by_items, partition_range};
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct Key(u64);
+
+    impl ReconcileItem for Key {
+        type Fingerprint = u64;
+        fn empty_fingerprint() -> u64 {
+            0
+        }
+        fn accumulate(fp: &mut u64, item: &Self) {
+            *fp ^= item.0;
+        }
+        fn combine(a: &u64, b: &u64) -> u64 {
+            a ^ b
+        }
+    }
 
     fn sid(t: u64, h0: u8) -> SyncId {
         let mut hash = [0u8; 32];
@@ -190,5 +213,57 @@ mod tests {
         assert_eq!(s.len(), 1);
         let err = s.insert(sid(2, 2)).unwrap_err();
         assert!(matches!(err, ReconcileError::SetTooLarge { max: 1, .. }));
+    }
+
+    #[test]
+    fn generic_partition_tiles_like_items() {
+        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let local: Vec<_> = (1..=8).map(|i| Key(i * 10)).collect();
+        for k in &local {
+            s.insert(k.clone()).unwrap();
+        }
+        let bounds = RangeBounds::new(Key(0), Key(100)).unwrap();
+        let parts = ReconcileSource::partition(&s, bounds.clone(), 4);
+        let expect = partition_by_items(bounds, &local, 4);
+        assert_eq!(parts, expect);
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0].a, Key(0));
+        assert_eq!(parts[3].b, Key(100));
+        for w in parts.windows(2) {
+            assert_eq!(w[0].b, w[1].a);
+        }
+        assert_eq!(parts[0].b, Key(30));
+        assert_eq!(parts[1].b, Key(50));
+        assert_eq!(parts[2].b, Key(70));
+    }
+
+    #[test]
+    fn syncid_partition_equals_partition_range() {
+        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        for i in 0..50u64 {
+            s.insert(sid(i, i as u8)).unwrap();
+        }
+        let bounds = RangeBounds::window(0, 100).unwrap();
+        assert_eq!(
+            ReconcileSource::partition(&s, bounds, 8),
+            partition_range(bounds, 8)
+        );
+        let empty = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        assert_eq!(
+            ReconcileSource::partition(&empty, bounds, 8),
+            partition_range(bounds, 8)
+        );
+        let a = SyncId::min_at(5);
+        let mut hb = [0u8; 32];
+        hb[0] = 0x80;
+        let b = SyncId {
+            timestamp: 5,
+            hash: hb,
+        };
+        let hash_bounds = RangeBounds::new(a, b).unwrap();
+        assert_eq!(
+            ReconcileSource::partition(&s, hash_bounds, 8),
+            partition_range(hash_bounds, 8)
+        );
     }
 }
