@@ -1,4 +1,4 @@
-//! In-memory topic-sync demo: PSI on topics, then per-topic reconciliation.
+//! In-memory topic-sync demo: PSI on topics, then multiplexed per-topic reconciliation.
 //!
 //! Run with:
 //! ```bash

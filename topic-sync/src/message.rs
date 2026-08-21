@@ -38,29 +38,21 @@ pub enum SyncMessage {
         double_blinded: DoubleBlindedPointsMessage,
     },
 
-    /// Initiator → responder. Double-blind of the responder, and the first
-    /// reconcile fingerprint when the topic intersection is non-empty.
+    /// Initiator → responder. Double-blind of the responder, and opening
+    /// fingerprints for every shared topic.
     PsiDone {
         /// Double-blind of the responder's blinded points.
         double_blinded: DoubleBlindedPointsMessage,
-        /// First shared topic's opening fingerprint, if any.
-        first_reconcile: Option<ReconcileFrame>,
+        /// One fingerprint per shared topic, in lexicographic hash order.
+        /// Empty if the topic intersection is empty.
+        opening: Vec<ReconcileFrame>,
     },
 
-    /// In-flight LIP-182 payload for exactly one topic.
-    Reconcile(ReconcileFrame),
-
-    /// The tagged topic's inner session is finished (absorbs the LIP-182
-    /// empty closer). `next` is the initiator's opening fingerprint for the
-    /// following topic, if any.
+    /// In-flight LIP-182 payloads for still-active shared topics.
     ///
-    /// Only the initiator sends this variant.
-    TopicComplete {
-        /// Hash of the topic that just finished.
-        topic_hash: [u8; 32],
-        /// Opening frame of the next shared topic, or `None` if this was last.
-        next: Option<ReconcileFrame>,
-    },
+    /// A topic that has finished on this side is omitted. The inner empty
+    /// closer is forwarded once as a frame so the peer can `step` it.
+    Reconcile(Vec<ReconcileFrame>),
 }
 
 #[cfg(test)]

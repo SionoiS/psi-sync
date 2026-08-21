@@ -1,14 +1,13 @@
-//! Composed session: PSI on topics, then one reconcile per shared topic.
+//! Composed session: PSI on topics, then multiplexed inner reconciles.
 
 use crate::error::{Result, TopicSyncError};
 use crate::message::{ReconcileFrame, SyncMessage};
 use crate::result::SyncResult;
-use crate::state::{Phase, Reconciling, Role};
+use crate::state::{Phase, Reconciling};
 use crate::stores::TopicStores;
 use psi::PsiProtocol;
-use reconciliation::{
-    RangeBounds, Reconcile, ReconcileError, ReconcileMessage, ReconcileStep, ReconcileStore,
-};
+use reconciliation::{RangeBounds, Reconcile, ReconcileError, ReconcileStep, ReconcileStore};
+use std::collections::HashMap;
 
 /// Outcome of [`TopicSync::step`].
 #[derive(Debug)]
@@ -103,15 +102,12 @@ impl<'a> TopicSync<'a> {
             Phase::ResponderPsiMid(psi) => match incoming {
                 SyncMessage::PsiDone {
                     double_blinded,
-                    first_reconcile,
-                } => responder_on_psi_done(stores, bounds, psi, double_blinded, first_reconcile),
+                    opening,
+                } => responder_on_psi_done(stores, bounds, psi, double_blinded, opening),
                 _ => Err(TopicSyncError::UnexpectedMessage),
             },
             Phase::Reconciling(rec) => match incoming {
-                SyncMessage::Reconcile(frame) => on_reconcile(stores, bounds, rec, frame),
-                SyncMessage::TopicComplete { topic_hash, next } => {
-                    on_topic_complete(stores, bounds, rec, topic_hash, next)
-                }
+                SyncMessage::Reconcile(frames) => on_reconcile(stores, bounds, rec, frames),
                 _ => Err(TopicSyncError::UnexpectedMessage),
             },
         }
@@ -152,6 +148,16 @@ fn expect_hash(expected: [u8; 32], actual: [u8; 32]) -> Result<()> {
     Ok(())
 }
 
+fn expect_opening(hashes: &[[u8; 32]], opening: &[ReconcileFrame]) -> Result<()> {
+    if hashes.len() != opening.len() {
+        return Err(TopicSyncError::UnexpectedMessage);
+    }
+    for (expected, frame) in hashes.iter().zip(opening) {
+        expect_hash(*expected, frame.topic_hash)?;
+    }
+    Ok(())
+}
+
 fn session<'a>(stores: &'a TopicStores, bounds: RangeBounds, phase: Phase<'a>) -> TopicSync<'a> {
     TopicSync {
         stores,
@@ -177,25 +183,28 @@ fn initiator_on_offer<'a>(
             result: SyncResult::default(),
             farewell: Some(SyncMessage::PsiDone {
                 double_blinded: my_double,
-                first_reconcile: None,
+                opening: Vec::new(),
             }),
         });
     }
 
-    let first_hash = hashes[0];
-    let (inner, first_body) = Reconcile::initiate(store_for(stores, &first_hash)?, bounds)?;
+    let mut inner = HashMap::with_capacity(hashes.len());
+    let mut opening = Vec::with_capacity(hashes.len());
+    for hash in &hashes {
+        let (sess, body) = Reconcile::initiate(store_for(stores, hash)?, bounds)?;
+        inner.insert(*hash, sess);
+        opening.push(ReconcileFrame::new(*hash, body));
+    }
     let rec = Reconciling {
-        role: Role::Initiator,
         hashes,
-        completed: 0,
-        inner: Some(inner),
+        inner,
         diffs: Vec::new(),
     };
     Ok(SyncStep::Next {
         next: session(stores, bounds, Phase::Reconciling(rec)),
         message: SyncMessage::PsiDone {
             double_blinded: my_double,
-            first_reconcile: Some(ReconcileFrame::new(first_hash, first_body)),
+            opening,
         },
     })
 }
@@ -222,165 +231,104 @@ fn responder_on_psi_done<'a>(
     bounds: RangeBounds,
     psi: PsiProtocol<psi::DoubleBlindedState>,
     double_blinded: psi::DoubleBlindedPointsMessage,
-    first_reconcile: Option<ReconcileFrame>,
+    opening: Vec<ReconcileFrame>,
 ) -> Result<SyncStep<'a>> {
     let psi_result = psi.finalize(double_blinded)?;
     let hashes = sorted_hashes(psi_result.intersection_hashes);
     require_local(stores, &hashes)?;
+    expect_opening(&hashes, &opening)?;
 
-    match (hashes.is_empty(), first_reconcile) {
-        (true, None) => Ok(SyncStep::Done {
+    if hashes.is_empty() {
+        return Ok(SyncStep::Done {
             result: SyncResult::default(),
             farewell: None,
-        }),
-        (false, Some(frame)) => {
-            let rec = Reconciling {
-                role: Role::Responder,
-                hashes,
-                completed: 0,
-                inner: None,
-                diffs: Vec::new(),
-            };
-            start_responder_topic(stores, bounds, rec, frame)
-        }
-        _ => Err(TopicSyncError::UnexpectedMessage),
+        });
     }
-}
 
-fn start_responder_topic<'a>(
-    stores: &'a TopicStores,
-    bounds: RangeBounds,
-    mut rec: Reconciling<'a>,
-    frame: ReconcileFrame,
-) -> Result<SyncStep<'a>> {
-    let expected = rec
-        .current_hash()
-        .ok_or(TopicSyncError::UnexpectedMessage)?;
-    expect_hash(expected, frame.topic_hash)?;
-    let inner = Reconcile::respond(store_for(stores, &frame.topic_hash)?);
-    match inner.step(frame.body)? {
-        ReconcileStep::Next { next, message } => {
-            rec.inner = Some(next);
-            Ok(SyncStep::Next {
-                next: session(stores, bounds, Phase::Reconciling(rec)),
-                message: SyncMessage::Reconcile(ReconcileFrame::new(frame.topic_hash, message)),
-            })
-        }
-        ReconcileStep::Done { result, farewell } => {
-            rec.record(result);
-            match farewell {
-                Some(body) => Ok(SyncStep::Next {
-                    next: session(stores, bounds, Phase::Reconciling(rec)),
-                    message: SyncMessage::Reconcile(ReconcileFrame::new(frame.topic_hash, body)),
-                }),
-                None => Err(TopicSyncError::UnexpectedMessage),
-            }
-        }
+    let mut inner = HashMap::with_capacity(hashes.len());
+    for hash in &hashes {
+        inner.insert(*hash, Reconcile::respond(store_for(stores, hash)?));
     }
+    let rec = Reconciling {
+        hashes,
+        inner,
+        diffs: Vec::new(),
+    };
+    on_reconcile(stores, bounds, rec, opening)
 }
 
 fn on_reconcile<'a>(
     stores: &'a TopicStores,
     bounds: RangeBounds,
     mut rec: Reconciling<'a>,
-    frame: ReconcileFrame,
+    frames: Vec<ReconcileFrame>,
 ) -> Result<SyncStep<'a>> {
-    let expected = rec
-        .current_hash()
-        .ok_or(TopicSyncError::UnexpectedMessage)?;
-    expect_hash(expected, frame.topic_hash)?;
-    let inner = rec.inner.take().ok_or(TopicSyncError::UnexpectedMessage)?;
-    match inner.step(frame.body)? {
-        ReconcileStep::Next { next, message } => {
-            rec.inner = Some(next);
-            Ok(SyncStep::Next {
-                next: session(stores, bounds, Phase::Reconciling(rec)),
-                message: SyncMessage::Reconcile(ReconcileFrame::new(frame.topic_hash, message)),
-            })
-        }
-        ReconcileStep::Done { result, farewell } => {
-            let finished = frame.topic_hash;
-            rec.record(result);
-            match rec.role {
-                Role::Initiator => initiator_after_topic_done(stores, bounds, rec, finished),
-                Role::Responder => match farewell {
-                    Some(body) => Ok(SyncStep::Next {
-                        next: session(stores, bounds, Phase::Reconciling(rec)),
-                        message: SyncMessage::Reconcile(ReconcileFrame::new(finished, body)),
-                    }),
-                    None => Err(TopicSyncError::UnexpectedMessage),
-                },
-            }
-        }
-    }
-}
-
-fn initiator_after_topic_done<'a>(
-    stores: &'a TopicStores,
-    bounds: RangeBounds,
-    mut rec: Reconciling<'a>,
-    finished_hash: [u8; 32],
-) -> Result<SyncStep<'a>> {
-    if rec.completed < rec.hashes.len() {
-        let next_hash = rec.hashes[rec.completed];
-        let (inner, first) = Reconcile::initiate(store_for(stores, &next_hash)?, bounds)?;
-        rec.inner = Some(inner);
-        Ok(SyncStep::Next {
-            next: session(stores, bounds, Phase::Reconciling(rec)),
-            message: SyncMessage::TopicComplete {
-                topic_hash: finished_hash,
-                next: Some(ReconcileFrame::new(next_hash, first)),
-            },
-        })
-    } else {
-        Ok(SyncStep::Done {
-            result: SyncResult { topics: rec.diffs },
-            farewell: Some(SyncMessage::TopicComplete {
-                topic_hash: finished_hash,
-                next: None,
-            }),
-        })
-    }
-}
-
-fn on_topic_complete<'a>(
-    stores: &'a TopicStores,
-    bounds: RangeBounds,
-    mut rec: Reconciling<'a>,
-    topic_hash: [u8; 32],
-    next: Option<ReconcileFrame>,
-) -> Result<SyncStep<'a>> {
-    if rec.role != Role::Responder {
+    if frames.is_empty() || frames.len() != rec.inner.len() {
         return Err(TopicSyncError::UnexpectedMessage);
     }
 
-    if let Some(inner) = rec.inner.take() {
-        let expected = rec
-            .current_hash()
-            .ok_or(TopicSyncError::UnexpectedMessage)?;
-        expect_hash(expected, topic_hash)?;
-        match inner.step(ReconcileMessage::empty())? {
-            ReconcileStep::Done { result, .. } => rec.record(result),
-            ReconcileStep::Next { .. } => return Err(TopicSyncError::UnexpectedMessage),
-        }
-    } else {
-        if rec.completed == 0 {
+    let mut incoming = HashMap::with_capacity(frames.len());
+    for frame in frames {
+        if incoming.insert(frame.topic_hash, frame.body).is_some() {
             return Err(TopicSyncError::UnexpectedMessage);
         }
-        expect_hash(rec.hashes[rec.completed - 1], topic_hash)?;
+        if !rec.inner.contains_key(&frame.topic_hash) {
+            return Err(TopicSyncError::TopicMismatch {
+                expected: rec.inner.keys().copied().min().unwrap_or(frame.topic_hash),
+                actual: frame.topic_hash,
+            });
+        }
     }
 
-    match next {
-        Some(frame) => start_responder_topic(stores, bounds, rec, frame),
-        None => {
-            if rec.completed != rec.hashes.len() {
-                return Err(TopicSyncError::UnexpectedMessage);
+    let mut hashes: Vec<_> = incoming.keys().copied().collect();
+    hashes.sort_unstable();
+    let mut outbound = Vec::new();
+    for hash in hashes {
+        let body = incoming.remove(&hash).expect("just inserted");
+        let inner = rec.inner.remove(&hash).expect("checked");
+        match inner.step(body)? {
+            ReconcileStep::Next { next, message } => {
+                rec.inner.insert(hash, next);
+                outbound.push(ReconcileFrame::new(hash, message));
             }
-            Ok(SyncStep::Done {
-                result: SyncResult { topics: rec.diffs },
-                farewell: None,
-            })
+            ReconcileStep::Done { result, farewell } => {
+                rec.record(hash, result);
+                if let Some(body) = farewell {
+                    outbound.push(ReconcileFrame::new(hash, body));
+                }
+            }
         }
+    }
+
+    emit(stores, bounds, rec, outbound)
+}
+
+fn emit<'a>(
+    stores: &'a TopicStores,
+    bounds: RangeBounds,
+    mut rec: Reconciling<'a>,
+    outbound: Vec<ReconcileFrame>,
+) -> Result<SyncStep<'a>> {
+    if rec.inner.is_empty() {
+        rec.diffs.sort_by_key(|d| d.topic_hash);
+        if rec.diffs.len() != rec.hashes.len() {
+            return Err(TopicSyncError::UnexpectedMessage);
+        }
+        Ok(SyncStep::Done {
+            result: SyncResult { topics: rec.diffs },
+            farewell: if outbound.is_empty() {
+                None
+            } else {
+                Some(SyncMessage::Reconcile(outbound))
+            },
+        })
+    } else if outbound.is_empty() {
+        Err(TopicSyncError::UnexpectedMessage)
+    } else {
+        Ok(SyncStep::Next {
+            next: session(stores, bounds, Phase::Reconciling(rec)),
+            message: SyncMessage::Reconcile(outbound),
+        })
     }
 }
 

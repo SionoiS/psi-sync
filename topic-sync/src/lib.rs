@@ -3,8 +3,8 @@
 //! Compose [`psi`] and [`reconciliation`] into one two-party session:
 //!
 //! 1. **PSI** on each party's topic set. Both learn only the topics they share.
-//! 2. **Range-based reconciliation** once per shared topic. Both learn the
-//!    [`SyncId`]s to send and receive for that topic's messages.
+//! 2. **Range-based reconciliation** in parallel per shared topic. Both learn
+//!    the [`SyncId`]s to send and receive for that topic's messages.
 //!
 //! Exclusive topics never appear on the reconciliation wire. The crate does
 //! not transfer payloads, does not talk to the network, and does not mutate
@@ -18,16 +18,16 @@
 //!
 //! 1. Initiator → responder: [`SyncMessage::PsiBlinded`].
 //! 2. Responder → initiator: [`SyncMessage::PsiOffer`].
-//! 3. Initiator → responder: [`SyncMessage::PsiDone`] (double-blind, plus the
-//!    first topic's fingerprint when the intersection is non-empty).
-//! 4. For each shared topic, in lexicographic PSI-hash order: inner
-//!    [`reconciliation::Reconcile`] frames, tagged by topic hash.
-//! 5. The initiator ends each topic with [`SyncMessage::TopicComplete`],
-//!    which absorbs the LIP-182 empty closer and may carry the next
-//!    topic's opening fingerprint.
+//! 3. Initiator → responder: [`SyncMessage::PsiDone`] (double-blind plus
+//!    one opening fingerprint per shared topic, in lexicographic PSI-hash
+//!    order). Empty `opening` is empty intersection.
+//! 4. Shared topics reconcile in parallel. Each [`SyncMessage::Reconcile`]
+//!    carries a [`ReconcileFrame`] per still-active topic. A finished topic
+//!    is omitted from later batches. The inner LIP-182 empty closer is
+//!    forwarded once as a frame so the peer can `step` it.
 //!
-//! Empty topic intersection is a successful no-op: `PsiDone` has
-//! `first_reconcile: None` and no reconcile frames are sent.
+//! Empty topic intersection is a successful no-op: `opening` is empty and
+//! no reconcile frames are sent.
 //!
 //! ## Example
 //!
@@ -149,26 +149,42 @@ mod integration_tests {
         let mut set = HashSet::new();
         for msg in msgs {
             match msg {
-                SyncMessage::PsiDone {
-                    first_reconcile, ..
-                } => {
-                    if let Some(frame) = first_reconcile {
-                        set.insert(frame.topic_hash);
-                    }
+                SyncMessage::PsiDone { opening, .. } => {
+                    set.extend(opening.iter().map(|f| f.topic_hash));
                 }
-                SyncMessage::Reconcile(frame) => {
-                    set.insert(frame.topic_hash);
-                }
-                SyncMessage::TopicComplete { topic_hash, next } => {
-                    set.insert(*topic_hash);
-                    if let Some(frame) = next {
-                        set.insert(frame.topic_hash);
-                    }
+                SyncMessage::Reconcile(frames) => {
+                    set.extend(frames.iter().map(|f| f.topic_hash));
                 }
                 SyncMessage::PsiBlinded(_) | SyncMessage::PsiOffer { .. } => {}
             }
         }
         set
+    }
+
+    fn reconcile_rounds(msgs: &[SyncMessage]) -> usize {
+        msgs.iter()
+            .filter(|m| matches!(m, SyncMessage::Reconcile(_)))
+            .count()
+    }
+
+    fn max_batch_frames(msgs: &[SyncMessage]) -> usize {
+        msgs.iter()
+            .map(|m| match m {
+                SyncMessage::PsiDone { opening, .. } => opening.len(),
+                SyncMessage::Reconcile(frames) => frames.len(),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn opening_of(msgs: &[SyncMessage]) -> &[ReconcileFrame] {
+        msgs.iter()
+            .find_map(|m| match m {
+                SyncMessage::PsiDone { opening, .. } => Some(opening.as_slice()),
+                _ => None,
+            })
+            .expect("PsiDone on the wire")
     }
 
     #[test]
@@ -201,10 +217,8 @@ mod integration_tests {
         assert!(ar.is_empty());
         assert!(br.is_empty());
         assert!(hashes_on_wire(&wire).is_empty());
-        assert!(wire.iter().all(|m| !matches!(
-            m,
-            SyncMessage::Reconcile(_) | SyncMessage::TopicComplete { .. }
-        )));
+        assert!(opening_of(&wire).is_empty());
+        assert!(wire.iter().all(|m| !matches!(m, SyncMessage::Reconcile(_))));
     }
 
     #[test]
@@ -232,12 +246,15 @@ mod integration_tests {
         insert(&mut alice, b"mmm", &[(3, 3)]);
         insert(&mut bob, b"mmm", &[(3, 3)]);
 
-        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
+        let (ar, br, wire) = run_pair_traced(&alice, &bob, window()).unwrap();
         assert_eq!(ar.len(), 3);
         let hashes: Vec<_> = ar.topics.iter().map(|d| d.topic_hash).collect();
         let mut sorted = hashes.clone();
         sorted.sort_unstable();
         assert_eq!(hashes, sorted);
+
+        let opening_hashes: Vec<_> = opening_of(&wire).iter().map(|f| f.topic_hash).collect();
+        assert_eq!(opening_hashes, hashes);
 
         let zzz = hash_bytes(b"zzz");
         let zzz_diff = ar.topics.iter().find(|d| d.topic_hash == zzz).unwrap();
@@ -273,6 +290,55 @@ mod integration_tests {
     }
 
     #[test]
+    fn several_shared_topics_run_in_parallel() {
+        let mut alice_one = TopicStores::new();
+        let mut bob_one = TopicStores::new();
+        insert(&mut alice_one, b"t0", &[(1, 1), (2, 2)]);
+        insert(&mut bob_one, b"t0", &[(1, 1), (3, 3)]);
+        let (_, _, wire_one) = run_pair_traced(&alice_one, &bob_one, window()).unwrap();
+        let one_rounds = reconcile_rounds(&wire_one);
+
+        let mut alice = TopicStores::new();
+        let mut bob = TopicStores::new();
+        insert(&mut alice, b"t0", &[(1, 1), (2, 2)]);
+        insert(&mut bob, b"t0", &[(1, 1), (3, 3)]);
+        insert(&mut alice, b"t1", &[(4, 4), (5, 5)]);
+        insert(&mut bob, b"t1", &[(4, 4), (6, 6)]);
+        insert(&mut alice, b"t2", &[(7, 7), (8, 8)]);
+        insert(&mut bob, b"t2", &[(7, 7), (9, 9)]);
+        insert(&mut alice, b"alice-only", &[(10, 10)]);
+        insert(&mut bob, b"bob-only", &[(11, 11)]);
+
+        let (ar, br, wire) = run_pair_traced(&alice, &bob, window()).unwrap();
+        assert_eq!(ar.len(), 3);
+        assert_eq!(br.len(), 3);
+        assert_eq!(opening_of(&wire).len(), 3);
+        assert_eq!(max_batch_frames(&wire), 3);
+
+        let multi_rounds = reconcile_rounds(&wire);
+        assert!(
+            multi_rounds <= one_rounds + 1,
+            "multiplex rounds {multi_rounds} should be about max ({one_rounds}), not the sum"
+        );
+        assert!(
+            multi_rounds < one_rounds * 3,
+            "multiplex rounds {multi_rounds} must be less than the sequential sum of {one_rounds}*3"
+        );
+
+        let seen = hashes_on_wire(&wire);
+        assert!(seen.contains(&hash_bytes(b"t0")));
+        assert!(seen.contains(&hash_bytes(b"t1")));
+        assert!(seen.contains(&hash_bytes(b"t2")));
+        assert!(!seen.contains(&hash_bytes(b"alice-only")));
+        assert!(!seen.contains(&hash_bytes(b"bob-only")));
+
+        let t1 = hash_bytes(b"t1");
+        let d = ar.topics.iter().find(|d| d.topic_hash == t1).unwrap();
+        assert_eq!(d.to_send, vec![sid(5, 5)]);
+        assert_eq!(d.to_recv, vec![sid(6, 6)]);
+    }
+
+    #[test]
     fn empty_stores() {
         let alice = TopicStores::new();
         let bob = TopicStores::new();
@@ -296,10 +362,10 @@ mod integration_tests {
         let stores = TopicStores::new();
         let (alice, _) = TopicSync::initiate(&stores, window()).unwrap();
         let err = alice
-            .step(SyncMessage::Reconcile(ReconcileFrame::new(
+            .step(SyncMessage::Reconcile(vec![ReconcileFrame::new(
                 [0u8; 32],
                 ReconcileMessage::empty(),
-            )))
+            )]))
             .unwrap_err();
         assert_eq!(err, TopicSyncError::UnexpectedMessage);
     }
@@ -324,17 +390,19 @@ mod integration_tests {
             message:
                 SyncMessage::PsiDone {
                     double_blinded,
-                    first_reconcile: Some(frame),
+                    opening,
                 },
             ..
         } = alice_sess.step(offer).unwrap()
         else {
-            panic!("expected PsiDone with first reconcile");
+            panic!("expected PsiDone with opening");
         };
+        assert_eq!(opening.len(), 1);
+        let frame = opening.into_iter().next().unwrap();
 
         let tampered = SyncMessage::PsiDone {
             double_blinded,
-            first_reconcile: Some(ReconcileFrame::new([0x11; 32], frame.body)),
+            opening: vec![ReconcileFrame::new([0x11; 32], frame.body)],
         };
         let err = bob_sess.step(tampered).unwrap_err();
         assert!(matches!(err, TopicSyncError::TopicMismatch { .. }));

@@ -127,14 +127,14 @@ Two parties each hold a map of **topics** (opaque byte strings) to per-topic `Re
 1. Which topics they share (PSI). Exclusive topics stay hidden.
 2. For each shared topic, which `SyncId`s to send and receive (LIP-182).
 
-Payload transfer is still the caller's job. The time window is the same for every shared topic. Topics are reconciled sequentially in lexicographic PSI-hash order. Transport- and codec-agnostic.
+Payload transfer is still the caller's job. The time window is the same for every shared topic. Shared topics reconcile in parallel; `PsiDone.opening` and later `Reconcile` batches list frames in lexicographic PSI-hash order. Transport- and codec-agnostic.
 
 ### Flow
 
 1. `TopicSync::initiate(&stores, bounds)` sends blinded topic points.
 2. The responder `step`s that into a `PsiOffer` (own blinded points + double-blind of the initiator).
-3. The initiator `step`s the offer, finalizes PSI, and sends `PsiDone` — the double-blind plus, if the intersection is non-empty, the first topic's reconcile fingerprint.
-4. Each shared topic runs an inner `Reconcile`. The initiator ends a topic with `TopicComplete`, which absorbs the LIP-182 empty closer and may carry the next topic's fingerprint.
+3. The initiator `step`s the offer, finalizes PSI, and sends `PsiDone` — the double-blind plus one opening fingerprint per shared topic (`opening` is empty on empty intersection).
+4. Each still-active shared topic runs an inner `Reconcile` in the same outer round. A finished topic is omitted from later batches. The inner LIP-182 empty closer is forwarded once as a frame so the peer can `step` it.
 5. `SyncResult.topics` lists per-topic `to_send` / `to_recv`. Stores are not mutated.
 
 Empty topic intersection is a successful no-op: no reconcile frames, no message IDs exchanged.

@@ -22,7 +22,7 @@ pub enum TopicSyncError {
     #[error("no local topic for hash")]
     UnknownTopic([u8; 32]),
 
-    /// A framed topic hash did not match the topic currently in flight.
+    /// A framed topic hash is not an in-flight shared topic.
     #[error("topic hash mismatch")]
     TopicMismatch {
         /// Hash this side expected.
