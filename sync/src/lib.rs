@@ -11,8 +11,10 @@
 //! is no transfer protocol.
 //!
 //! The session is type-state: only [`Reconcile<Running>`] can [`Reconcile::step`].
-//! `step` consumes `self`, like `psi::PsiProtocol::compute`. The store is
-//! frozen for the session: do not insert or remove until it ends.
+//! `step` consumes `self`, like `psi::PsiProtocol::compute`. Each `step` reads
+//! a consistent snapshot of [`ReconcileStore`]; inserts on the live store are
+//! allowed and become visible in later rounds (already-`Skip`ped ranges miss
+//! them). Removes/`prune_before` keep in-flight snapshots intact (path copy).
 //!
 //! ## Example
 //!
@@ -21,8 +23,8 @@
 //!     RangeBounds, Reconcile, ReconcileStep, ReconcileStore, SyncId,
 //! };
 //!
-//! let mut alice_store = ReconcileStore::new(Default::default())?;
-//! let mut bob_store = ReconcileStore::new(Default::default())?;
+//! let alice_store = ReconcileStore::new(Default::default())?;
+//! let bob_store = ReconcileStore::new(Default::default())?;
 //! alice_store.insert(SyncId::new(1, [1u8; 32]))?;
 //! alice_store.insert(SyncId::new(2, [2u8; 32]))?;
 //! bob_store.insert(SyncId::new(1, [1u8; 32]))?;
@@ -94,8 +96,8 @@
 //!     fn combine(a: &u64, b: &u64) -> u64 { a ^ b }
 //! }
 //!
-//! let mut alice = ReconcileStore::new(Default::default())?;
-//! let mut bob = ReconcileStore::new(Default::default())?;
+//! let alice = ReconcileStore::new(Default::default())?;
+//! let bob = ReconcileStore::new(Default::default())?;
 //! alice.insert(Key(1))?;
 //! alice.insert(Key(2))?;
 //! bob.insert(Key(1))?;
@@ -176,8 +178,8 @@ mod integration_tests {
             hash
         }
 
-        let mut alice = ReconcileStore::new(ReconcileConfig::default()).unwrap();
-        let mut bob = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let alice = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let bob = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         for i in 0..1000u64 {
             let id = SyncId::new(1_000 + i, mix(0x11, i));
             alice.insert(id).unwrap();

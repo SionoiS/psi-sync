@@ -8,8 +8,9 @@
 //!
 //! Exclusive topics never appear on the reconciliation wire. The crate does
 //! not transfer payloads, does not talk to the network, and does not mutate
-//! stores with `to_recv` IDs. Stores are frozen for the session: do not
-//! insert or remove until it ends.
+//! stores with `to_recv` IDs. Overlapping sessions may share one
+//! [`TopicStores`]. Message inserts are visible in later inner reconcile
+//! steps; a topic added after PSI started is not in this intersection.
 //!
 //! ## Protocol
 //!
@@ -37,15 +38,15 @@
 //!     RangeBounds, ReconcileStore, SyncId, SyncStep, TopicStores, TopicSync,
 //! };
 //!
-//! let mut alice_topics = TopicStores::new();
-//! let mut bob_topics = TopicStores::new();
+//! let alice_topics = TopicStores::new();
+//! let bob_topics = TopicStores::new();
 //!
-//! let mut shared = ReconcileStore::new(Default::default())?;
+//! let shared = ReconcileStore::new(Default::default())?;
 //! shared.insert(SyncId::new(1, [1u8; 32]))?;
-//! alice_topics.insert(b"shared".to_vec(), shared.clone())?;
+//! alice_topics.insert(b"shared".to_vec(), shared.snapshot())?;
 //! bob_topics.insert(b"shared".to_vec(), shared)?;
 //!
-//! let mut alice_only = ReconcileStore::new(Default::default())?;
+//! let alice_only = ReconcileStore::new(Default::default())?;
 //! alice_only.insert(SyncId::new(2, [2u8; 32]))?;
 //! alice_topics.insert(b"alice-only".to_vec(), alice_only)?;
 //!
@@ -105,7 +106,7 @@
 
 pub use error::{Result, TopicSyncError};
 pub use message::{ReconcileFrame, SyncMessage};
-pub use psi::{hash_bytes, BlindedPointsMessage, DoubleBlindedPointsMessage};
+pub use psi::{hash_bytes, BlindedPointsMessage, DoubleBlindedPointsMessage, HashedItems};
 pub use result::{SyncResult, TopicDiff};
 pub use session::{SyncStep, TopicSync};
 pub use stores::TopicStores;
@@ -121,7 +122,7 @@ mod stores;
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::session::{run_pair, run_pair_traced};
+    use crate::session::{drive, drive_traced, run_pair, run_pair_traced};
     use std::collections::HashSet;
     use sync::ReconcileConfig;
 
@@ -132,7 +133,7 @@ mod integration_tests {
     }
 
     fn store(ids: &[(u64, u8)]) -> ReconcileStore {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         for &(t, h) in ids {
             s.insert(sid(t, h)).unwrap();
         }
@@ -143,7 +144,7 @@ mod integration_tests {
         RangeBounds::window(0, 1_000).unwrap()
     }
 
-    fn insert(map: &mut TopicStores, topic: &[u8], ids: &[(u64, u8)]) {
+    fn insert(map: &TopicStores, topic: &[u8], ids: &[(u64, u8)]) {
         map.insert(topic.to_vec(), store(ids)).unwrap();
     }
 
@@ -191,12 +192,12 @@ mod integration_tests {
 
     #[test]
     fn overlapping_topics_complementary_diffs() {
-        let mut alice = TopicStores::new();
-        let mut bob = TopicStores::new();
-        insert(&mut alice, b"shared", &[(1, 1), (2, 2)]);
-        insert(&mut bob, b"shared", &[(1, 1), (3, 3)]);
-        insert(&mut alice, b"alice-only", &[(9, 9)]);
-        insert(&mut bob, b"bob-only", &[(8, 8)]);
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        insert(&alice, b"shared", &[(1, 1), (2, 2)]);
+        insert(&bob, b"shared", &[(1, 1), (3, 3)]);
+        insert(&alice, b"alice-only", &[(9, 9)]);
+        insert(&bob, b"bob-only", &[(8, 8)]);
 
         let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
         assert_eq!(ar.len(), 1);
@@ -210,10 +211,10 @@ mod integration_tests {
 
     #[test]
     fn no_topic_overlap_no_reconcile_frames() {
-        let mut alice = TopicStores::new();
-        let mut bob = TopicStores::new();
-        insert(&mut alice, b"alice-only", &[(1, 1)]);
-        insert(&mut bob, b"bob-only", &[(2, 2)]);
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        insert(&alice, b"alice-only", &[(1, 1)]);
+        insert(&bob, b"bob-only", &[(2, 2)]);
 
         let (ar, br, wire) = run_pair_traced(&alice, &bob, window()).unwrap();
         assert!(ar.is_empty());
@@ -225,10 +226,10 @@ mod integration_tests {
 
     #[test]
     fn identical_shared_topic_empty_diff() {
-        let mut alice = TopicStores::new();
-        let mut bob = TopicStores::new();
-        insert(&mut alice, b"t", &[(1, 1), (2, 2)]);
-        insert(&mut bob, b"t", &[(1, 1), (2, 2)]);
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        insert(&alice, b"t", &[(1, 1), (2, 2)]);
+        insert(&bob, b"t", &[(1, 1), (2, 2)]);
 
         let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
         assert_eq!(ar.len(), 1);
@@ -239,14 +240,14 @@ mod integration_tests {
 
     #[test]
     fn several_shared_topics_sorted_hashes() {
-        let mut alice = TopicStores::new();
-        let mut bob = TopicStores::new();
-        insert(&mut alice, b"aaa", &[(1, 1)]);
-        insert(&mut bob, b"aaa", &[(1, 1)]);
-        insert(&mut alice, b"zzz", &[(2, 2), (4, 4)]);
-        insert(&mut bob, b"zzz", &[(2, 2), (5, 5)]);
-        insert(&mut alice, b"mmm", &[(3, 3)]);
-        insert(&mut bob, b"mmm", &[(3, 3)]);
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        insert(&alice, b"aaa", &[(1, 1)]);
+        insert(&bob, b"aaa", &[(1, 1)]);
+        insert(&alice, b"zzz", &[(2, 2), (4, 4)]);
+        insert(&bob, b"zzz", &[(2, 2), (5, 5)]);
+        insert(&alice, b"mmm", &[(3, 3)]);
+        insert(&bob, b"mmm", &[(3, 3)]);
 
         let (ar, br, wire) = run_pair_traced(&alice, &bob, window()).unwrap();
         assert_eq!(ar.len(), 3);
@@ -277,12 +278,12 @@ mod integration_tests {
 
     #[test]
     fn exclusive_topics_never_on_wire() {
-        let mut alice = TopicStores::new();
-        let mut bob = TopicStores::new();
-        insert(&mut alice, b"shared", &[(1, 1)]);
-        insert(&mut bob, b"shared", &[(1, 1)]);
-        insert(&mut alice, b"secret-a", &[(2, 2)]);
-        insert(&mut bob, b"secret-b", &[(3, 3)]);
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        insert(&alice, b"shared", &[(1, 1)]);
+        insert(&bob, b"shared", &[(1, 1)]);
+        insert(&alice, b"secret-a", &[(2, 2)]);
+        insert(&bob, b"secret-b", &[(3, 3)]);
 
         let (_, _, wire) = run_pair_traced(&alice, &bob, window()).unwrap();
         let seen = hashes_on_wire(&wire);
@@ -293,23 +294,23 @@ mod integration_tests {
 
     #[test]
     fn several_shared_topics_run_in_parallel() {
-        let mut alice_one = TopicStores::new();
-        let mut bob_one = TopicStores::new();
-        insert(&mut alice_one, b"t0", &[(1, 1), (2, 2)]);
-        insert(&mut bob_one, b"t0", &[(1, 1), (3, 3)]);
+        let alice_one = TopicStores::new();
+        let bob_one = TopicStores::new();
+        insert(&alice_one, b"t0", &[(1, 1), (2, 2)]);
+        insert(&bob_one, b"t0", &[(1, 1), (3, 3)]);
         let (_, _, wire_one) = run_pair_traced(&alice_one, &bob_one, window()).unwrap();
         let one_rounds = reconcile_rounds(&wire_one);
 
-        let mut alice = TopicStores::new();
-        let mut bob = TopicStores::new();
-        insert(&mut alice, b"t0", &[(1, 1), (2, 2)]);
-        insert(&mut bob, b"t0", &[(1, 1), (3, 3)]);
-        insert(&mut alice, b"t1", &[(4, 4), (5, 5)]);
-        insert(&mut bob, b"t1", &[(4, 4), (6, 6)]);
-        insert(&mut alice, b"t2", &[(7, 7), (8, 8)]);
-        insert(&mut bob, b"t2", &[(7, 7), (9, 9)]);
-        insert(&mut alice, b"alice-only", &[(10, 10)]);
-        insert(&mut bob, b"bob-only", &[(11, 11)]);
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        insert(&alice, b"t0", &[(1, 1), (2, 2)]);
+        insert(&bob, b"t0", &[(1, 1), (3, 3)]);
+        insert(&alice, b"t1", &[(4, 4), (5, 5)]);
+        insert(&bob, b"t1", &[(4, 4), (6, 6)]);
+        insert(&alice, b"t2", &[(7, 7), (8, 8)]);
+        insert(&bob, b"t2", &[(7, 7), (9, 9)]);
+        insert(&alice, b"alice-only", &[(10, 10)]);
+        insert(&bob, b"bob-only", &[(11, 11)]);
 
         let (ar, br, wire) = run_pair_traced(&alice, &bob, window()).unwrap();
         assert_eq!(ar.len(), 3);
@@ -351,9 +352,9 @@ mod integration_tests {
 
     #[test]
     fn empty_vs_nonempty_topics() {
-        let mut alice = TopicStores::new();
+        let alice = TopicStores::new();
         let bob = TopicStores::new();
-        insert(&mut alice, b"only-alice", &[(1, 1)]);
+        insert(&alice, b"only-alice", &[(1, 1)]);
         let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
         assert!(ar.is_empty());
         assert!(br.is_empty());
@@ -374,10 +375,10 @@ mod integration_tests {
 
     #[test]
     fn topic_mismatch_on_first_reconcile() {
-        let mut alice = TopicStores::new();
-        let mut bob = TopicStores::new();
-        insert(&mut alice, b"shared", &[(1, 1)]);
-        insert(&mut bob, b"shared", &[(1, 1)]);
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        insert(&alice, b"shared", &[(1, 1)]);
+        insert(&bob, b"shared", &[(1, 1)]);
 
         let (alice_sess, first) = TopicSync::initiate(&alice, window()).unwrap();
         let bob_sess = TopicSync::respond(&bob, window()).unwrap();
@@ -420,5 +421,60 @@ mod integration_tests {
             err,
             TopicSyncError::Reconcile(sync::ReconcileError::InvalidBounds)
         ));
+    }
+
+    #[test]
+    fn two_sessions_share_one_topic_stores() {
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        let carol = TopicStores::new();
+        insert(&alice, b"shared", &[(1, 1), (2, 2)]);
+        insert(&bob, b"shared", &[(1, 1)]);
+        insert(&carol, b"shared", &[(1, 1), (2, 2), (3, 3)]);
+        let (ar_b, br) = run_pair(&alice, &bob, window()).unwrap();
+        let (ar_c, cr) = run_pair(&alice, &carol, window()).unwrap();
+        assert_eq!(ar_b.topics[0].to_send, vec![sid(2, 2)]);
+        assert_eq!(br.topics[0].to_recv, vec![sid(2, 2)]);
+        assert_eq!(ar_c.topics[0].to_recv, vec![sid(3, 3)]);
+        assert_eq!(cr.topics[0].to_send, vec![sid(3, 3)]);
+    }
+
+    #[test]
+    fn insert_message_during_session_still_terminates() {
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        insert(&alice, b"t", &[(1, 1), (2, 2)]);
+        insert(&bob, b"t", &[(1, 1)]);
+        let bounds = window();
+        let (alice_sess, first) = TopicSync::initiate(&alice, bounds).unwrap();
+        let bob_sess = TopicSync::respond(&bob, bounds).unwrap();
+        alice.get(b"t").unwrap().insert(sid(9, 9)).unwrap();
+        let (ar, br) = drive(alice_sess, bob_sess, first).unwrap();
+        assert_eq!(ar.topics.len(), 1);
+        assert_eq!(br.topics.len(), 1);
+        assert_eq!(ar.topics[0].to_send, br.topics[0].to_recv);
+        assert_eq!(ar.topics[0].to_recv, br.topics[0].to_send);
+    }
+
+    #[test]
+    fn topic_added_after_psi_start_is_not_in_intersection() {
+        let alice = TopicStores::new();
+        let bob = TopicStores::new();
+        insert(&alice, b"shared", &[(1, 1)]);
+        insert(&bob, b"shared", &[(1, 1)]);
+        let (alice_sess, first) = TopicSync::initiate(&alice, window()).unwrap();
+        insert(&alice, b"late", &[(2, 2)]);
+        insert(&bob, b"late", &[(2, 2)]);
+        let bob_sess = TopicSync::respond(&bob, window()).unwrap();
+        let (ar, br, wire) = {
+            let mut wire = vec![first.clone()];
+            let (ar, br) = drive_traced(alice_sess, bob_sess, first, &mut wire).unwrap();
+            (ar, br, wire)
+        };
+        assert_eq!(ar.len(), 1);
+        assert_eq!(br.len(), 1);
+        let seen = hashes_on_wire(&wire);
+        assert!(seen.contains(&hash_bytes(b"shared")));
+        assert!(!seen.contains(&hash_bytes(b"late")));
     }
 }

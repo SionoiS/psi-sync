@@ -20,10 +20,10 @@ pub struct ReconcileResult<T = SyncId> {
 
 /// Outcome of [`Reconcile::step`].
 #[derive(Debug)]
-pub enum ReconcileStep<'store, Src: ReconcileSource = ReconcileStore> {
+pub enum ReconcileStep<Src: ReconcileSource = ReconcileStore> {
     /// Send `message` and continue with `next`.
     Next {
-        next: Reconcile<'store, Running, Src>,
+        next: Reconcile<Running, Src>,
         message: ReconcileMessage<Src::Item, Src::Bounds>,
     },
     /// Session over. Send `farewell` if this side produced the empty closer.
@@ -37,14 +37,18 @@ pub enum ReconcileStep<'store, Src: ReconcileSource = ReconcileStore> {
 ///
 /// Construct with [`Reconcile::initiate`] or [`Reconcile::respond`]. Only
 /// [`Reconcile<Running>`] has [`step`](Reconcile::step).
-pub struct Reconcile<'store, S: ReconcileState, Src: ReconcileSource = ReconcileStore> {
-    store: &'store Src,
+///
+/// Holds a cloned [`ReconcileSource`] handle. For [`ReconcileStore`] that
+/// is a live alias of the tree, so inserts on the original are visible in
+/// later `step`s (each step still snapshots).
+pub struct Reconcile<S: ReconcileState, Src: ReconcileSource = ReconcileStore> {
+    store: Src,
     state: S,
     to_send: BTreeSet<Src::Item>,
     to_recv: BTreeSet<Src::Item>,
 }
 
-impl<S: ReconcileState, Src: ReconcileSource> std::fmt::Debug for Reconcile<'_, S, Src> {
+impl<S: ReconcileState, Src: ReconcileSource> std::fmt::Debug for Reconcile<S, Src> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reconcile").finish_non_exhaustive()
     }
@@ -58,19 +62,20 @@ type PairResult<Src> = (
     ReconcileResult<<Src as ReconcileSource>::Item>,
 );
 
-impl<'store, Src: ReconcileSource> Reconcile<'store, Running, Src> {
+impl<Src: ReconcileSource + Clone> Reconcile<Running, Src> {
     /// Start as initiator: one Fingerprint over `bounds`.
-    pub fn initiate(store: &'store Src, bounds: Src::Bounds) -> Result<(Self, SourceMessage<Src>)> {
+    pub fn initiate(store: &Src, bounds: Src::Bounds) -> Result<(Self, SourceMessage<Src>)> {
         if !bounds.is_valid() {
             return Err(ReconcileError::InvalidBounds);
         }
+        let store = store.clone();
+        let fp = store.fingerprint(bounds.clone());
         let session = Self {
             store,
             state: Running::new(),
             to_send: BTreeSet::new(),
             to_recv: BTreeSet::new(),
         };
-        let fp = store.fingerprint(bounds.clone());
         let message = ReconcileMessage {
             ranges: vec![Range::fingerprint(bounds, fp)],
         };
@@ -78,9 +83,9 @@ impl<'store, Src: ReconcileSource> Reconcile<'store, Running, Src> {
     }
 
     /// Start as responder. The first [`step`](Self::step) consumes the initiator message.
-    pub fn respond(store: &'store Src) -> Self {
+    pub fn respond(store: &Src) -> Self {
         Self {
-            store,
+            store: store.clone(),
             state: Running::new(),
             to_send: BTreeSet::new(),
             to_recv: BTreeSet::new(),
@@ -88,7 +93,7 @@ impl<'store, Src: ReconcileSource> Reconcile<'store, Running, Src> {
     }
 
     /// Process one incoming message. Consumes `self`.
-    pub fn step(mut self, incoming: SourceMessage<Src>) -> Result<ReconcileStep<'store, Src>> {
+    pub fn step(mut self, incoming: SourceMessage<Src>) -> Result<ReconcileStep<Src>> {
         if incoming.is_empty() {
             return Ok(ReconcileStep::Done {
                 result: self.into_result(),
@@ -103,7 +108,9 @@ impl<'store, Src: ReconcileSource> Reconcile<'store, Running, Src> {
             });
         }
 
-        let out = process_payload(self.store, &incoming)?;
+        let out = self
+            .store
+            .with_view(|view| process_payload(view, &incoming))?;
         self.to_send.extend(out.to_send);
         self.to_recv.extend(out.to_recv);
 
@@ -130,7 +137,7 @@ impl<'store, Src: ReconcileSource> Reconcile<'store, Running, Src> {
 
 /// Drive two sessions to completion over an in-memory channel.
 #[cfg(test)]
-pub(crate) fn run_pair<Src: ReconcileSource>(
+pub(crate) fn run_pair<Src: ReconcileSource + Clone>(
     alice_store: &Src,
     bob_store: &Src,
     bounds: Src::Bounds,
@@ -141,9 +148,9 @@ pub(crate) fn run_pair<Src: ReconcileSource>(
 }
 
 #[cfg(test)]
-fn drive<'a, Src: ReconcileSource>(
-    mut alice: Reconcile<'a, Running, Src>,
-    mut bob: Reconcile<'a, Running, Src>,
+fn drive<Src: ReconcileSource + Clone>(
+    mut alice: Reconcile<Running, Src>,
+    mut bob: Reconcile<Running, Src>,
     mut incoming: SourceMessage<Src>,
 ) -> Result<PairResult<Src>> {
     loop {
@@ -170,8 +177,8 @@ fn drive<'a, Src: ReconcileSource>(
 }
 
 #[cfg(test)]
-fn finish_peer<Src: ReconcileSource>(
-    session: Reconcile<'_, Running, Src>,
+fn finish_peer<Src: ReconcileSource + Clone>(
+    session: Reconcile<Running, Src>,
     farewell: Option<SourceMessage<Src>>,
 ) -> Result<ReconcileResult<Src::Item>> {
     match farewell {
@@ -205,7 +212,7 @@ mod tests {
     }
 
     fn store(ids: &[(u64, u8)]) -> ReconcileStore {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         for &(t, h) in ids {
             s.insert(sid(t, h)).unwrap();
         }
@@ -416,8 +423,8 @@ mod tests {
             partitions: 8,
             ..Default::default()
         };
-        let mut alice = ReconcileStore::new(cfg).unwrap();
-        let mut bob = ReconcileStore::new(cfg).unwrap();
+        let alice = ReconcileStore::new(cfg).unwrap();
+        let bob = ReconcileStore::new(cfg).unwrap();
         alice.insert(sid(1, 1)).unwrap();
         alice.insert(sid(2, 2)).unwrap();
         bob.insert(sid(1, 1)).unwrap();
@@ -619,7 +626,7 @@ mod tests {
     }
 
     fn filled(cfg: ReconcileConfig, extra: Option<(u64, u8)>) -> ReconcileStore {
-        let mut s = ReconcileStore::new(cfg).unwrap();
+        let s = ReconcileStore::new(cfg).unwrap();
         for t in (50..1000).step_by(50) {
             s.insert(sid(t, t as u8)).unwrap();
         }
@@ -663,6 +670,83 @@ mod tests {
             "expected about span/w peels, got {steps_hot} steps"
         );
     }
+
+    #[test]
+    fn two_sessions_share_one_store() {
+        let alice = store(&[(1, 1), (2, 2), (3, 3)]);
+        let bob = store(&[(1, 1)]);
+        let carol = store(&[(1, 1), (3, 3)]);
+        let (ar_b, br) = run_pair(&alice, &bob, window()).unwrap();
+        let (ar_c, cr) = run_pair(&alice, &carol, window()).unwrap();
+        assert_eq!(ar_b.to_send, vec![sid(2, 2), sid(3, 3)]);
+        assert!(ar_b.to_recv.is_empty());
+        assert_eq!(br.to_recv, ar_b.to_send);
+        assert_eq!(ar_c.to_send, vec![sid(2, 2)]);
+        assert!(ar_c.to_recv.is_empty());
+        assert_eq!(cr.to_recv, ar_c.to_send);
+    }
+
+    #[test]
+    fn insert_after_skip_is_missed_this_session() {
+        let alice = store(&[(1, 1), (2, 2)]);
+        let bob = store(&[(1, 1), (2, 2)]);
+        let (ar, br) = run_pair(&alice, &bob, window()).unwrap();
+        assert!(ar.to_send.is_empty() && ar.to_recv.is_empty());
+        assert!(br.to_send.is_empty() && br.to_recv.is_empty());
+        alice.insert(sid(9, 9)).unwrap();
+        let (ar2, br2) = run_pair(&alice, &bob, window()).unwrap();
+        assert_eq!(ar2.to_send, vec![sid(9, 9)]);
+        assert_eq!(br2.to_recv, vec![sid(9, 9)]);
+    }
+
+    #[test]
+    fn insert_during_open_range_still_terminates() {
+        let cfg = ReconcileConfig {
+            threshold: 2,
+            partitions: 8,
+            ..Default::default()
+        };
+        let alice = ReconcileStore::new(cfg).unwrap();
+        let bob = ReconcileStore::new(cfg).unwrap();
+        for t in 0..40u64 {
+            alice.insert(sid(t, t as u8)).unwrap();
+            if t % 2 == 0 {
+                bob.insert(sid(t, t as u8)).unwrap();
+            }
+        }
+        let (mut alice_sess, first) = Reconcile::initiate(&alice, window()).unwrap();
+        let mut bob_sess = Reconcile::respond(&bob);
+        let mut incoming = first;
+        let mut steps = 0usize;
+        let (ar, br) = loop {
+            steps += 1;
+            if steps == 2 {
+                alice.insert(sid(500, 99)).unwrap();
+            }
+            match bob_sess.step(incoming).unwrap() {
+                ReconcileStep::Next { next, message } => {
+                    bob_sess = next;
+                    match alice_sess.step(message).unwrap() {
+                        ReconcileStep::Next { next, message } => {
+                            alice_sess = next;
+                            incoming = message;
+                        }
+                        ReconcileStep::Done { result, farewell } => {
+                            let br = finish_peer(bob_sess, farewell).unwrap();
+                            break (result, br);
+                        }
+                    }
+                }
+                ReconcileStep::Done { result, farewell } => {
+                    let ar = finish_peer(alice_sess, farewell).unwrap();
+                    break (ar, result);
+                }
+            }
+        };
+        assert_eq!(ar.to_send, br.to_recv);
+        assert_eq!(ar.to_recv, br.to_send);
+        assert!(steps < 64);
+    }
 }
 
 #[cfg(test)]
@@ -692,7 +776,7 @@ mod generic_item_tests {
     }
 
     fn store(ids: &[u64]) -> ReconcileStore<Key> {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         for &n in ids {
             s.insert(Key(n)).unwrap();
         }
@@ -764,8 +848,8 @@ mod generic_item_tests {
             partitions: 4,
             ..Default::default()
         };
-        let mut alice = ReconcileStore::new(cfg).unwrap();
-        let mut bob = ReconcileStore::new(cfg).unwrap();
+        let alice = ReconcileStore::new(cfg).unwrap();
+        let bob = ReconcileStore::new(cfg).unwrap();
         for n in 1..=20u64 {
             alice.insert(Key(n)).unwrap();
             if n % 2 == 0 {

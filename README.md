@@ -21,7 +21,7 @@ The protocol is ECDH-PSI on the [Ristretto](https://ristretto.group/) group (`cu
 
 ### Flow
 
-1. `PsiProtocol::new(&items)` — hash items, map to the curve (DST `psi-sync/v1`), blind with a fresh scalar.
+1. `PsiProtocol::new(&items)` — hash items, map to the curve (DST `psi-sync/v1`), blind with a fresh scalar. Cache hash-to-curve in `HashedItems` and start later sessions with `from_hashed` (still a fresh scalar and shuffled first-round order).
 2. Exchange `BlindedPointsMessage` from `message()`.
 3. `compute(peer_msg)` — double-blind the peer’s points. Returns an intermediate state and a `DoubleBlindedPointsMessage`.
 4. Exchange that second message. **Order is significant**: each returned point must correspond to the received point at the same index.
@@ -69,7 +69,7 @@ Range-based set reconciliation over any totally ordered item type (`ReconcileIte
 
 The local set is a **monoid tree** (Meyer, Algorithm 1): each AVL node stores the XOR fingerprint and size of its subtree, so a range fingerprint is a path walk rather than a scan. `TaggedStore` nests that tree into a 2-D range tree (tag × item). Query a single topic with `RectBounds::topic` — never a hash **interval** of topics, which would include exclusive subscriptions whose hashes fall between two shared ones. `psi-sync` still keeps per-topic stores and PSI for that reason.
 
-This crate implements **reconciliation only**, not a transfer protocol and not a particular message-hashing scheme (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself. `codec`, `RangeBounds::window`, and `prune_before` are `SyncId`-specific. The store is frozen for the life of a `Reconcile` session: do not insert or remove while it is running.
+This crate implements **reconciliation only**, not a transfer protocol and not a particular message-hashing scheme (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself. `codec`, `RangeBounds::window`, and `prune_before` are `SyncId`-specific. `ReconcileStore` accepts inserts during a session: each `step` reads a consistent snapshot, so a new id in an already-`Skip`ped range is missed this round.
 
 ### Flow
 
@@ -85,8 +85,8 @@ This crate implements **reconciliation only**, not a transfer protocol and not a
 ```rust
 use sync::{RangeBounds, Reconcile, ReconcileStep, ReconcileStore, SyncId};
 
-let mut alice = ReconcileStore::new(Default::default())?;
-let mut bob = ReconcileStore::new(Default::default())?;
+let alice = ReconcileStore::new(Default::default())?;
+let bob = ReconcileStore::new(Default::default())?;
 alice.insert(SyncId::new(1, [1u8; 32]))?;
 bob.insert(SyncId::new(1, [1u8; 32]))?;
 bob.insert(SyncId::new(2, [2u8; 32]))?;
@@ -127,7 +127,7 @@ Two parties each hold a map of **topics** (opaque byte strings) to per-topic `Re
 1. Which topics they share (PSI). Exclusive topics stay hidden.
 2. For each shared topic, which `SyncId`s to send and receive.
 
-Payload transfer is still the caller's job. The time window is the same for every shared topic. Shared topics reconcile in parallel; `PsiDone.opening` and later `Reconcile` batches list frames in lexicographic PSI-hash order. Transport- and codec-agnostic. Stores are frozen for the life of a `TopicSync` session: do not insert or remove while it is running.
+Payload transfer is still the caller's job. The time window is the same for every shared topic. Shared topics reconcile in parallel; `PsiDone.opening` and later `Reconcile` batches list frames in lexicographic PSI-hash order. Transport- and codec-agnostic. Overlapping sessions share one `TopicStores`. Message inserts are visible in later reconcile rounds; topics added after PSI started are omitted this session.
 
 ### Flow
 
@@ -144,11 +144,11 @@ Empty topic intersection is a successful no-op: no reconcile frames, no message 
 ```rust
 use psi_sync::{RangeBounds, ReconcileStore, SyncId, TopicStores, TopicSync};
 
-let mut alice = TopicStores::new();
-let mut bob = TopicStores::new();
+let alice = TopicStores::new();
+let bob = TopicStores::new();
 alice.insert(b"chat".to_vec(), ReconcileStore::new(Default::default())?)?;
 bob.insert(b"chat".to_vec(), ReconcileStore::new(Default::default())?)?;
-alice.get_mut(b"chat").unwrap().insert(SyncId::new(1, [1u8; 32]))?;
+alice.get(b"chat").unwrap().insert(SyncId::new(1, [1u8; 32]))?;
 
 let bounds = RangeBounds::window(0, 10)?;
 let (alice_sess, first) = TopicSync::initiate(&alice, bounds)?;

@@ -16,8 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Range-based set reconciliation ===\n");
 
     let mut rng = OsRng;
-    let mut alice_store = ReconcileStore::new(Default::default())?;
-    let mut bob_store = ReconcileStore::new(Default::default())?;
+    let alice_store = ReconcileStore::new(Default::default())?;
+    let bob_store = ReconcileStore::new(Default::default())?;
 
     let mut shared = 0usize;
     for _ in 0..20 {
@@ -61,9 +61,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run<'a>(
-    mut alice: Reconcile<'a, sync::Running>,
-    mut bob: Reconcile<'a, sync::Running>,
+fn run(
+    mut alice: Reconcile<sync::Running>,
+    mut bob: Reconcile<sync::Running>,
     mut incoming: ReconcileMessage,
 ) -> Result<(ReconcileResult, ReconcileResult), sync::ReconcileError> {
     let mut rounds = 0u32;
@@ -100,7 +100,7 @@ fn run<'a>(
 }
 
 fn close(
-    session: Reconcile<'_, sync::Running>,
+    session: Reconcile<sync::Running>,
     farewell: Option<ReconcileMessage>,
 ) -> Result<ReconcileResult, sync::ReconcileError> {
     let msg = farewell.unwrap_or_else(ReconcileMessage::empty);

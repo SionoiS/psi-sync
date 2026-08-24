@@ -3,21 +3,26 @@
 //! Each vertex stores `lift_f` of its subtree and the subtree size. Range
 //! fingerprints and counts are path aggregations; insert/delete recompute
 //! labels along the rotation path.
+//!
+//! Nodes are [`Arc`] so a clone of the tree is an O(1) snapshot. Writes
+//! path-copy (`Arc::make_mut`): unique trees mutate in place, shared
+//! snapshots keep the old nodes.
 
 use crate::bounds::RangeBounds;
 use crate::item::ReconcileItem;
+use std::sync::Arc;
 
 pub(crate) struct Node<T: ReconcileItem> {
     pub(crate) value: T,
-    left: Option<Box<Node<T>>>,
-    right: Option<Box<Node<T>>>,
+    left: Option<Arc<Node<T>>>,
+    right: Option<Arc<Node<T>>>,
     height: i8,
     size: usize,
     label: T::Fingerprint,
 }
 
 pub(crate) struct MonoidTree<T: ReconcileItem> {
-    root: Option<Box<Node<T>>>,
+    root: Option<Arc<Node<T>>>,
 }
 
 impl<T: ReconcileItem> Default for MonoidTree<T> {
@@ -209,15 +214,15 @@ impl<T: ReconcileItem + std::fmt::Debug> std::fmt::Debug for MonoidTree<T> {
     }
 }
 
-fn size<T: ReconcileItem>(n: &Option<Box<Node<T>>>) -> usize {
+fn size<T: ReconcileItem>(n: &Option<Arc<Node<T>>>) -> usize {
     n.as_ref().map(|x| x.size).unwrap_or(0)
 }
 
-fn height<T: ReconcileItem>(n: &Option<Box<Node<T>>>) -> i8 {
+fn height<T: ReconcileItem>(n: &Option<Arc<Node<T>>>) -> i8 {
     n.as_ref().map(|x| x.height).unwrap_or(-1)
 }
 
-fn label<T: ReconcileItem>(n: &Option<Box<Node<T>>>) -> T::Fingerprint {
+fn label<T: ReconcileItem>(n: &Option<Arc<Node<T>>>) -> T::Fingerprint {
     n.as_ref()
         .map(|x| x.label.clone())
         .unwrap_or_else(T::empty_fingerprint)
@@ -236,41 +241,66 @@ fn balance_factor<T: ReconcileItem>(n: &Node<T>) -> i8 {
     height(&n.left) - height(&n.right)
 }
 
-fn rotate_left<T: ReconcileItem>(mut n: Box<Node<T>>) -> Box<Node<T>> {
-    let mut r = n
-        .right
-        .take()
-        .expect("rotate_left on node with no right child");
-    n.right = r.left.take();
-    pull_up(&mut n);
-    r.left = Some(n);
-    pull_up(&mut r);
+fn rotate_left<T: ReconcileItem>(mut n: Arc<Node<T>>) -> Arc<Node<T>> {
+    let mut r = {
+        let n = Arc::make_mut(&mut n);
+        n.right
+            .take()
+            .expect("rotate_left on node with no right child")
+    };
+    {
+        let r_mut = Arc::make_mut(&mut r);
+        {
+            let n_mut = Arc::make_mut(&mut n);
+            n_mut.right = r_mut.left.take();
+            pull_up(n_mut);
+        }
+        r_mut.left = Some(n);
+        pull_up(r_mut);
+    }
     r
 }
 
-fn rotate_right<T: ReconcileItem>(mut n: Box<Node<T>>) -> Box<Node<T>> {
-    let mut l = n
-        .left
-        .take()
-        .expect("rotate_right on node with no left child");
-    n.left = l.right.take();
-    pull_up(&mut n);
-    l.right = Some(n);
-    pull_up(&mut l);
+fn rotate_right<T: ReconcileItem>(mut n: Arc<Node<T>>) -> Arc<Node<T>> {
+    let mut l = {
+        let n = Arc::make_mut(&mut n);
+        n.left
+            .take()
+            .expect("rotate_right on node with no left child")
+    };
+    {
+        let l_mut = Arc::make_mut(&mut l);
+        {
+            let n_mut = Arc::make_mut(&mut n);
+            n_mut.left = l_mut.right.take();
+            pull_up(n_mut);
+        }
+        l_mut.right = Some(n);
+        pull_up(l_mut);
+    }
     l
 }
 
-fn rebalance<T: ReconcileItem>(mut n: Box<Node<T>>) -> Box<Node<T>> {
-    pull_up(&mut n);
-    let bf = balance_factor(&n);
+fn rebalance<T: ReconcileItem>(mut n: Arc<Node<T>>) -> Arc<Node<T>> {
+    let bf = {
+        let n = Arc::make_mut(&mut n);
+        pull_up(n);
+        balance_factor(n)
+    };
     if bf > 1 {
-        if balance_factor(n.left.as_ref().unwrap()) < 0 {
-            n.left = Some(rotate_left(n.left.take().unwrap()));
+        {
+            let n = Arc::make_mut(&mut n);
+            if balance_factor(n.left.as_ref().unwrap()) < 0 {
+                n.left = Some(rotate_left(n.left.take().unwrap()));
+            }
         }
         rotate_right(n)
     } else if bf < -1 {
-        if balance_factor(n.right.as_ref().unwrap()) > 0 {
-            n.right = Some(rotate_right(n.right.take().unwrap()));
+        {
+            let n = Arc::make_mut(&mut n);
+            if balance_factor(n.right.as_ref().unwrap()) > 0 {
+                n.right = Some(rotate_right(n.right.take().unwrap()));
+            }
         }
         rotate_left(n)
     } else {
@@ -279,13 +309,13 @@ fn rebalance<T: ReconcileItem>(mut n: Box<Node<T>>) -> Box<Node<T>> {
 }
 
 fn insert_node<T: ReconcileItem>(
-    node: Option<Box<Node<T>>>,
+    node: Option<Arc<Node<T>>>,
     value: T,
     inserted: &mut bool,
-) -> Option<Box<Node<T>>> {
+) -> Option<Arc<Node<T>>> {
     let Some(mut n) = node else {
         *inserted = true;
-        return Some(Box::new(Node {
+        return Some(Arc::new(Node {
             label: T::singleton(&value),
             value,
             left: None,
@@ -294,17 +324,20 @@ fn insert_node<T: ReconcileItem>(
             size: 1,
         }));
     };
-    match value.cmp(&n.value) {
+    let ord = value.cmp(&n.value);
+    match ord {
         std::cmp::Ordering::Equal => {
-            n.value = value;
+            Arc::make_mut(&mut n).value = value;
             Some(n)
         }
         std::cmp::Ordering::Less => {
-            n.left = insert_node(n.left.take(), value, inserted);
+            let left = Arc::make_mut(&mut n).left.take();
+            Arc::make_mut(&mut n).left = insert_node(left, value, inserted);
             Some(rebalance(n))
         }
         std::cmp::Ordering::Greater => {
-            n.right = insert_node(n.right.take(), value, inserted);
+            let right = Arc::make_mut(&mut n).right.take();
+            Arc::make_mut(&mut n).right = insert_node(right, value, inserted);
             Some(rebalance(n))
         }
     }
@@ -319,32 +352,41 @@ fn min_node<T: ReconcileItem>(n: &Node<T>) -> &Node<T> {
 }
 
 fn remove_node<T: ReconcileItem>(
-    node: Option<Box<Node<T>>>,
+    node: Option<Arc<Node<T>>>,
     value: &T,
     removed: &mut bool,
-) -> Option<Box<Node<T>>> {
+) -> Option<Arc<Node<T>>> {
     let mut n = node?;
     match value.cmp(&n.value) {
         std::cmp::Ordering::Less => {
-            n.left = remove_node(n.left.take(), value, removed);
+            let left = Arc::make_mut(&mut n).left.take();
+            Arc::make_mut(&mut n).left = remove_node(left, value, removed);
             Some(rebalance(n))
         }
         std::cmp::Ordering::Greater => {
-            n.right = remove_node(n.right.take(), value, removed);
+            let right = Arc::make_mut(&mut n).right.take();
+            Arc::make_mut(&mut n).right = remove_node(right, value, removed);
             Some(rebalance(n))
         }
         std::cmp::Ordering::Equal => {
             *removed = true;
-            match (n.left.take(), n.right.take()) {
+            let (left, right) = {
+                let n = Arc::make_mut(&mut n);
+                (n.left.take(), n.right.take())
+            };
+            match (left, right) {
                 (None, right) => right,
                 (left, None) => left,
                 (left, Some(right)) => {
                     let succ = min_node(&right).value.clone();
                     let mut dummy = false;
                     let right = remove_node(Some(right), &succ, &mut dummy);
-                    n.value = succ;
-                    n.left = left;
-                    n.right = right;
+                    {
+                        let n = Arc::make_mut(&mut n);
+                        n.value = succ;
+                        n.left = left;
+                        n.right = right;
+                    }
                     Some(rebalance(n))
                 }
             }
@@ -352,12 +394,12 @@ fn remove_node<T: ReconcileItem>(
     }
 }
 
-fn build_sorted<T: ReconcileItem>(items: &[T]) -> Option<Box<Node<T>>> {
+fn build_sorted<T: ReconcileItem>(items: &[T]) -> Option<Arc<Node<T>>> {
     if items.is_empty() {
         return None;
     }
     let mid = items.len() / 2;
-    let mut n = Box::new(Node {
+    let mut n = Arc::new(Node {
         value: items[mid].clone(),
         left: build_sorted(&items[..mid]),
         right: build_sorted(&items[mid + 1..]),
@@ -365,24 +407,24 @@ fn build_sorted<T: ReconcileItem>(items: &[T]) -> Option<Box<Node<T>>> {
         size: 0,
         label: T::empty_fingerprint(),
     });
-    pull_up(&mut n);
+    pull_up(Arc::make_mut(&mut n));
     Some(n)
 }
 
-type Split<T> = (Option<Box<Node<T>>>, Option<Box<Node<T>>>);
+type Split<T> = (Option<Arc<Node<T>>>, Option<Arc<Node<T>>>);
 
 /// Split into `(< key, >= key)`.
-fn split_node<T: ReconcileItem>(node: Option<Box<Node<T>>>, key: &T) -> Split<T> {
+fn split_node<T: ReconcileItem>(node: Option<Arc<Node<T>>>, key: &T) -> Split<T> {
     let Some(mut n) = node else {
         return (None, None);
     };
     if n.value.cmp(key) == std::cmp::Ordering::Less {
-        let (rl, rr) = split_node(n.right.take(), key);
-        n.right = rl;
+        let (rl, rr) = split_node(Arc::make_mut(&mut n).right.take(), key);
+        Arc::make_mut(&mut n).right = rl;
         (Some(rebalance(n)), rr)
     } else {
-        let (ll, lr) = split_node(n.left.take(), key);
-        n.left = lr;
+        let (ll, lr) = split_node(Arc::make_mut(&mut n).left.take(), key);
+        Arc::make_mut(&mut n).left = lr;
         (ll, Some(rebalance(n)))
     }
 }
@@ -756,6 +798,25 @@ mod tests {
         t.assert_invariants();
         let all: Vec<_> = t.iter_range(&sid(0, 0), &sid(10, 0)).cloned().collect();
         assert_eq!(all, vec![sid(1, 1), sid(2, 1), sid(3, 1)]);
+    }
+
+    #[test]
+    fn clone_is_snapshot() {
+        let mut t = MonoidTree::new();
+        t.insert(sid(1, 1));
+        t.insert(sid(2, 2));
+        let snap = t.clone();
+        let fp = snap.aggregate_range(&sid(0, 0), &sid(10, 0));
+        t.insert(sid(3, 3));
+        t.remove(&sid(1, 1));
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap.aggregate_range(&sid(0, 0), &sid(10, 0)), fp);
+        let snap_items: Vec<_> = snap.iter_range(&sid(0, 0), &sid(10, 0)).cloned().collect();
+        assert_eq!(snap_items, vec![sid(1, 1), sid(2, 2)]);
+        let live: Vec<_> = t.iter_range(&sid(0, 0), &sid(10, 0)).cloned().collect();
+        assert_eq!(live, vec![sid(2, 2), sid(3, 3)]);
+        snap.assert_invariants();
+        t.assert_invariants();
     }
 
     #[test]

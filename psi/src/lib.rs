@@ -22,7 +22,10 @@
 //! Both parties follow the same two network rounds:
 //!
 //! 1. **Prepare** (local): [`PsiProtocol::new`] hashes items, maps them to
-//!    the curve with DST `psi-sync/v1`, and blinds them.
+//!    the curve with DST `psi-sync/v1`, and blinds them. Reuse a
+//!    [`HashedItems`] cache via [`PsiProtocol::from_hashed`] when the same
+//!    set is used for many sessions (fresh scalar and shuffled order each
+//!    time).
 //! 2. **Round 1**: exchange [`BlindedPointsMessage`] (`message()`).
 //! 3. **Double-blind** (local): [`PsiProtocol::compute`] multiplies the
 //!    peer's points by the local secret.
@@ -83,16 +86,18 @@
 //!
 //! The public types are [`PsiProtocol`], [`PsiState`], [`PreparedState`],
 //! [`DoubleBlindedState`], the two message structs, [`PsiResult`],
-//! [`PsiError`], [`hash_bytes`], and [`MAX_ITEMS`].
+//! [`PsiError`], [`hash_bytes`], [`HashedItems`], and [`MAX_ITEMS`].
 
 pub use crypto::hash_bytes;
 pub use error::{PsiError, Result};
+pub use hashed::HashedItems;
 pub use messages::{BlindedPointsMessage, DoubleBlindedPointsMessage, PsiResult};
 pub use protocol::{PsiProtocol, MAX_ITEMS};
 pub use state::{DoubleBlindedState, PreparedState, PsiState};
 
 mod crypto;
 mod error;
+mod hashed;
 mod messages;
 mod protocol;
 mod state;

@@ -12,33 +12,33 @@ use psi_sync::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Topic-sync (PSI then reconcile) ===\n");
 
-    let mut alice_topics = TopicStores::new();
-    let mut bob_topics = TopicStores::new();
+    let alice_topics = TopicStores::new();
+    let bob_topics = TopicStores::new();
 
     fill(
-        &mut alice_topics,
+        &alice_topics,
         b"shared-chat",
         &[(1_000, 0x01), (1_100, 0x02), (1_200, 0x0a)],
     )?;
     fill(
-        &mut bob_topics,
+        &bob_topics,
         b"shared-chat",
         &[(1_000, 0x01), (1_100, 0x02), (1_300, 0x0b)],
     )?;
 
     fill(
-        &mut alice_topics,
+        &alice_topics,
         b"shared-alerts",
         &[(2_000, 0x21), (2_100, 0x22)],
     )?;
     fill(
-        &mut bob_topics,
+        &bob_topics,
         b"shared-alerts",
         &[(2_000, 0x21), (2_100, 0x22)],
     )?;
 
-    fill(&mut alice_topics, b"alice-private", &[(3_000, 0x31)])?;
-    fill(&mut bob_topics, b"bob-private", &[(4_000, 0x41)])?;
+    fill(&alice_topics, b"alice-private", &[(3_000, 0x31)])?;
+    fill(&bob_topics, b"bob-private", &[(4_000, 0x41)])?;
 
     println!("Alice topics: {}", alice_topics.len());
     println!("Bob topics:   {}\n", bob_topics.len());
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for diff in &alice_result.topics {
         let name = alice_topics
             .topic_bytes(&diff.topic_hash)
-            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_else(|| hex32(&diff.topic_hash));
         println!(
             "  {name}: alice to_send={} to_recv={}",
@@ -74,11 +74,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn fill(
-    map: &mut TopicStores,
+    map: &TopicStores,
     topic: &[u8],
     ids: &[(u64, u8)],
 ) -> Result<(), psi_sync::TopicSyncError> {
-    let mut store = ReconcileStore::new(Default::default())?;
+    let store = ReconcileStore::new(Default::default())?;
     for &(t, h0) in ids {
         let mut hash = [0u8; 32];
         hash[0] = h0;
@@ -87,9 +87,9 @@ fn fill(
     map.insert(topic.to_vec(), store)
 }
 
-fn run<'a>(
-    mut alice: TopicSync<'a>,
-    mut bob: TopicSync<'a>,
+fn run(
+    mut alice: TopicSync,
+    mut bob: TopicSync,
     mut incoming: SyncMessage,
 ) -> Result<(SyncResult, SyncResult), psi_sync::TopicSyncError> {
     loop {
@@ -114,7 +114,7 @@ fn run<'a>(
 }
 
 fn close(
-    session: TopicSync<'_>,
+    session: TopicSync,
     farewell: Option<SyncMessage>,
 ) -> Result<SyncResult, psi_sync::TopicSyncError> {
     let msg = farewell.ok_or(psi_sync::TopicSyncError::UnexpectedMessage)?;

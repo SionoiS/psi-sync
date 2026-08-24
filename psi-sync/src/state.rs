@@ -6,15 +6,15 @@ use std::collections::HashMap;
 use sync::{Reconcile, ReconcileResult, Running};
 
 /// In-flight per-topic reconciliation after PSI has finished.
-pub(crate) struct Reconciling<'a> {
+pub(crate) struct Reconciling {
     /// Sorted intersection hashes. Result order, and the expected complete set.
     pub hashes: Vec<[u8; 32]>,
     /// Inner reconcile session per still-active topic.
-    pub inner: HashMap<[u8; 32], Reconcile<'a, Running>>,
+    pub inner: HashMap<[u8; 32], Reconcile<Running>>,
     pub diffs: Vec<TopicDiff>,
 }
 
-impl Reconciling<'_> {
+impl Reconciling {
     pub(crate) fn record(&mut self, hash: [u8; 32], result: ReconcileResult) {
         self.diffs.push(TopicDiff {
             topic_hash: hash,
@@ -25,7 +25,7 @@ impl Reconciling<'_> {
 }
 
 /// Private type-state of the outer session.
-pub(crate) enum Phase<'a> {
+pub(crate) enum Phase {
     /// Initiator has sent [`crate::SyncMessage::PsiBlinded`].
     InitiatorPsi(PsiProtocol<PreparedState>),
     /// Responder is waiting for the initiator's blinded points.
@@ -33,5 +33,5 @@ pub(crate) enum Phase<'a> {
     /// Responder has sent [`crate::SyncMessage::PsiOffer`].
     ResponderPsiMid(PsiProtocol<DoubleBlindedState>),
     /// Shared topics are being reconciled in parallel.
-    Reconciling(Reconciling<'a>),
+    Reconciling(Reconciling),
 }

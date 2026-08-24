@@ -2,7 +2,7 @@
 
 /// Marker trait implemented by protocol states.
 ///
-/// Public so callers can name `Reconcile<'s, S: ReconcileState>`.
+/// Public so callers can name `Reconcile<S: ReconcileState>`.
 pub trait ReconcileState {}
 
 /// In-progress session: `step` is available.

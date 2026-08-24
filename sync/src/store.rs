@@ -8,12 +8,27 @@ use crate::item::ReconcileItem;
 use crate::partition::partition_by_nth;
 use crate::source::ReconcileSource;
 use crate::tree::MonoidTree;
+use std::sync::{Arc, Mutex};
 
 /// Ordered set of items plus the reconciliation tunables.
-#[derive(Clone, Debug)]
+///
+/// Insert, remove, and prune take `&self`. Concurrent [`crate::Reconcile`]
+/// sessions may share one store; each `step` snapshots the tree so a live
+/// insert cannot tear fingerprints. [`Clone`] is a live alias (same tree).
+/// [`Self::snapshot`] is an O(1) isolated copy.
+#[derive(Debug)]
 pub struct ReconcileStore<T: ReconcileItem = SyncId> {
-    items: MonoidTree<T>,
+    items: Arc<Mutex<MonoidTree<T>>>,
     config: ReconcileConfig,
+}
+
+impl<T: ReconcileItem> Clone for ReconcileStore<T> {
+    fn clone(&self) -> Self {
+        Self {
+            items: Arc::clone(&self.items),
+            config: self.config,
+        }
+    }
 }
 
 impl<T: ReconcileItem> ReconcileStore<T> {
@@ -21,9 +36,21 @@ impl<T: ReconcileItem> ReconcileStore<T> {
     pub fn new(config: ReconcileConfig) -> Result<Self> {
         config.validate()?;
         Ok(Self {
-            items: MonoidTree::new(),
+            items: Arc::new(Mutex::new(MonoidTree::new())),
             config,
         })
+    }
+
+    /// Isolated copy: later inserts on `self` are not visible here.
+    pub fn snapshot(&self) -> Self {
+        Self {
+            items: Arc::new(Mutex::new(self.lock_tree().clone())),
+            config: self.config,
+        }
+    }
+
+    fn lock_tree(&self) -> std::sync::MutexGuard<'_, MonoidTree<T>> {
+        self.items.lock().expect("reconcile store lock poisoned")
     }
 
     /// Store configuration.
@@ -32,64 +59,67 @@ impl<T: ReconcileItem> ReconcileStore<T> {
     }
 
     /// Insert `id`. Duplicates are ignored. Errors if `max_items` would be exceeded.
-    pub fn insert(&mut self, id: T) -> Result<()> {
-        if self.items.len() >= self.config.max_items && !self.items.contains(&id) {
+    ///
+    /// The cap check and the insert share one lock so concurrent inserts
+    /// cannot both pass `max_items`.
+    pub fn insert(&self, id: T) -> Result<()> {
+        let mut items = self.lock_tree();
+        if items.len() >= self.config.max_items && !items.contains(&id) {
             return Err(ReconcileError::SetTooLarge {
-                size: self.items.len() + 1,
+                size: items.len() + 1,
                 max: self.config.max_items,
             });
         }
-        self.items.insert(id);
+        items.insert(id);
         Ok(())
     }
 
     /// Remove `id`. Returns `true` if it was present.
-    pub fn remove(&mut self, id: &T) -> bool {
-        self.items.remove(id)
+    pub fn remove(&self, id: &T) -> bool {
+        self.lock_tree().remove(id)
     }
 
     /// Number of stored items.
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.lock_tree().len()
     }
 
     /// True if the store is empty.
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.lock_tree().is_empty()
     }
 
-    /// Items in `[bounds.a, bounds.b)`.
-    pub fn items(&self, bounds: RangeBounds<T>) -> impl Iterator<Item = &T> {
-        self.items.iter_range(&bounds.a, &bounds.b)
+    /// Items in `[bounds.a, bounds.b)`, in order.
+    ///
+    /// Walks a snapshot so the lock is not held for the listing.
+    pub fn items(&self, bounds: RangeBounds<T>) -> Vec<T> {
+        let snap = self.lock_tree().clone();
+        snap.iter_range(&bounds.a, &bounds.b).cloned().collect()
     }
 
     /// Number of items in `bounds`.
     pub fn count(&self, bounds: RangeBounds<T>) -> usize {
-        self.items.count_range(&bounds.a, &bounds.b)
+        self.lock_tree().count_range(&bounds.a, &bounds.b)
     }
 
     /// Fingerprint of items in `bounds`. Empty range → [`T::empty_fingerprint`].
     pub fn fingerprint(&self, bounds: RangeBounds<T>) -> T::Fingerprint {
-        self.items.aggregate_range(&bounds.a, &bounds.b)
+        self.lock_tree().aggregate_range(&bounds.a, &bounds.b)
     }
 
     /// Fingerprint and count of each sorted, disjoint bound in one tree walk.
     pub fn fingerprint_counts(&self, bounds: &[RangeBounds<T>]) -> Vec<(T::Fingerprint, usize)> {
-        self.items.aggregate_and_count_ranges(bounds)
+        self.lock_tree().aggregate_and_count_ranges(bounds)
     }
 
     /// Fingerprints of sorted, disjoint `bounds` in one tree walk.
     pub fn fingerprints(&self, bounds: &[RangeBounds<T>]) -> Vec<T::Fingerprint> {
-        self.items.aggregate_ranges(bounds)
+        self.lock_tree().aggregate_ranges(bounds)
     }
 
     /// Counts of sorted, disjoint `bounds` in one tree walk.
     pub fn counts(&self, bounds: &[RangeBounds<T>]) -> Vec<usize> {
-        self.items.count_ranges(bounds)
-    }
-
-    fn items_vec(&self, bounds: RangeBounds<T>) -> Vec<T> {
-        self.items(bounds).cloned().collect()
+        self.lock_tree().count_ranges(bounds)
     }
 }
 
@@ -110,7 +140,7 @@ impl<T: ReconcileItem> ReconcileSource for ReconcileStore<T> {
     }
 
     fn items(&self, bounds: Self::Bounds) -> Vec<T> {
-        self.items_vec(bounds)
+        ReconcileStore::items(self, bounds)
     }
 
     fn count(&self, bounds: Self::Bounds) -> usize {
@@ -125,25 +155,32 @@ impl<T: ReconcileItem> ReconcileSource for ReconcileStore<T> {
         if let Some(parts) = T::partition_domain_hot(bounds.clone(), count, self.config.hot_tail) {
             return parts;
         }
-        let n = self.items.count_range(&bounds.a, &bounds.b);
+        let snap = self.lock_tree().clone();
+        let n = snap.count_range(&bounds.a, &bounds.b);
         partition_by_nth(bounds.clone(), n, count, |k| {
-            self.items.nth_in_range(&bounds.a, &bounds.b, k).cloned()
+            snap.nth_in_range(&bounds.a, &bounds.b, k).cloned()
         })
     }
 
     fn config(&self) -> &ReconcileConfig {
         ReconcileStore::config(self)
     }
+
+    fn with_view<R>(&self, f: impl FnOnce(&Self) -> R) -> R {
+        f(&self.snapshot())
+    }
 }
 
 impl ReconcileStore<SyncId> {
     /// Drop every item with `timestamp < timestamp`. Returns the number removed.
-    pub fn prune_before(&mut self, timestamp: u64) -> usize {
+    ///
+    /// In-flight snapshots keep the pruned nodes; new sessions do not see them.
+    pub fn prune_before(&self, timestamp: u64) -> usize {
         let bound = SyncId {
             timestamp,
             hash: EMPTY_HASH,
         };
-        self.items.remove_before(&bound)
+        self.lock_tree().remove_before(&bound)
     }
 }
 
@@ -177,22 +214,19 @@ mod tests {
 
     #[test]
     fn insert_orders_and_dedups() {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         s.insert(sid(2, 1)).unwrap();
         s.insert(sid(1, 1)).unwrap();
         s.insert(sid(2, 1)).unwrap();
         assert_eq!(s.len(), 2);
-        let v: Vec<_> = s
-            .items(RangeBounds::window(0, 10).unwrap())
-            .cloned()
-            .collect();
+        let v = s.items(RangeBounds::window(0, 10).unwrap());
         assert_eq!(v[0], sid(1, 1));
         assert_eq!(v[1], sid(2, 1));
     }
 
     #[test]
     fn remove_present_and_absent() {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         s.insert(sid(1, 1)).unwrap();
         assert!(s.remove(&sid(1, 1)));
         assert!(!s.remove(&sid(1, 1)));
@@ -205,7 +239,7 @@ mod tests {
             max_items: 1,
             ..Default::default()
         };
-        let mut s = ReconcileStore::new(cfg).unwrap();
+        let s = ReconcileStore::new(cfg).unwrap();
         s.insert(sid(1, 1)).unwrap();
         assert!(s.remove(&sid(1, 1)));
         s.insert(sid(2, 2)).unwrap();
@@ -214,27 +248,24 @@ mod tests {
 
     #[test]
     fn prune_before_drops_strictly_older() {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         s.insert(sid(1, 1)).unwrap();
         s.insert(sid(2, 1)).unwrap();
         s.insert(sid(3, 1)).unwrap();
         assert_eq!(s.prune_before(2), 1);
         assert_eq!(s.len(), 2);
-        let v: Vec<_> = s
-            .items(RangeBounds::window(0, 10).unwrap())
-            .cloned()
-            .collect();
+        let v = s.items(RangeBounds::window(0, 10).unwrap());
         assert_eq!(v[0], sid(2, 1));
     }
 
     #[test]
     fn items_exclusive_upper() {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         s.insert(sid(10, 0)).unwrap();
         s.insert(sid(15, 0)).unwrap();
         s.insert(sid(20, 0)).unwrap();
         let bounds = RangeBounds::window(10, 20).unwrap();
-        let sl: Vec<_> = s.items(bounds).cloned().collect();
+        let sl = s.items(bounds);
         assert_eq!(sl.len(), 2);
         assert_eq!(sl[0], sid(10, 0));
         assert_eq!(sl[1], sid(15, 0));
@@ -242,7 +273,7 @@ mod tests {
 
     #[test]
     fn fingerprint_known_set() {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         let mut h1 = [0u8; 32];
         h1[0] = 0x0f;
         let mut h2 = [0u8; 32];
@@ -261,7 +292,7 @@ mod tests {
             max_items: 1,
             ..Default::default()
         };
-        let mut s = ReconcileStore::new(cfg).unwrap();
+        let s = ReconcileStore::new(cfg).unwrap();
         s.insert(sid(1, 1)).unwrap();
         s.insert(sid(1, 1)).unwrap();
         assert_eq!(s.len(), 1);
@@ -271,7 +302,7 @@ mod tests {
 
     #[test]
     fn generic_partition_tiles_like_items() {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         let local: Vec<_> = (1..=8).map(|i| Key(i * 10)).collect();
         for k in &local {
             s.insert(k.clone()).unwrap();
@@ -293,7 +324,7 @@ mod tests {
 
     #[test]
     fn syncid_partition_equals_partition_range() {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         for i in 0..50u64 {
             s.insert(sid(i, i as u8)).unwrap();
         }
@@ -349,7 +380,7 @@ mod tests {
             hot_tail: Some(100),
             ..Default::default()
         };
-        let mut s = ReconcileStore::new(cfg).unwrap();
+        let s = ReconcileStore::new(cfg).unwrap();
         let local: Vec<_> = (1..=8).map(|i| Key(i * 10)).collect();
         for k in &local {
             s.insert(k.clone()).unwrap();
@@ -361,7 +392,7 @@ mod tests {
 
     #[test]
     fn bulk_fingerprints_match_per_range() {
-        let mut s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
         for i in 0..40u64 {
             s.insert(sid(i, i as u8)).unwrap();
         }
@@ -383,5 +414,63 @@ mod tests {
         assert!(ReconcileSource::fingerprint_counts(&s, &[] as &[RangeBounds]).is_empty());
         assert!(ReconcileSource::fingerprints(&s, &[] as &[RangeBounds]).is_empty());
         assert!(ReconcileSource::counts(&s, &[] as &[RangeBounds]).is_empty());
+    }
+
+    #[test]
+    fn clone_shares_live_tree() {
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        s.insert(sid(1, 1)).unwrap();
+        let alias = s.clone();
+        alias.insert(sid(2, 2)).unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(
+            s.items(RangeBounds::window(0, 10).unwrap()),
+            alias.items(RangeBounds::window(0, 10).unwrap())
+        );
+    }
+
+    #[test]
+    fn clone_is_snapshot_isolation() {
+        let s = ReconcileStore::new(ReconcileConfig::default()).unwrap();
+        s.insert(sid(1, 1)).unwrap();
+        s.insert(sid(2, 2)).unwrap();
+        let snap = s.snapshot();
+        let fp = snap.fingerprint(RangeBounds::window(0, 10).unwrap());
+        s.insert(sid(3, 3)).unwrap();
+        s.remove(&sid(1, 1));
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap.fingerprint(RangeBounds::window(0, 10).unwrap()), fp);
+        assert_eq!(
+            snap.items(RangeBounds::window(0, 10).unwrap()),
+            vec![sid(1, 1), sid(2, 2)]
+        );
+        assert_eq!(s.len(), 2);
+        assert_eq!(
+            s.items(RangeBounds::window(0, 10).unwrap()),
+            vec![sid(2, 2), sid(3, 3)]
+        );
+    }
+
+    #[test]
+    fn concurrent_insert_respects_max_items() {
+        let cfg = ReconcileConfig {
+            max_items: 50,
+            ..Default::default()
+        };
+        let store = std::sync::Arc::new(ReconcileStore::new(cfg).unwrap());
+        let mut joins = Vec::new();
+        for t in 0u64..4 {
+            let store = store.clone();
+            joins.push(std::thread::spawn(move || {
+                for i in 0..40u64 {
+                    let _ = store.insert(sid(t * 40 + i, i as u8));
+                }
+            }));
+        }
+        for j in joins {
+            j.join().unwrap();
+        }
+        assert!(store.len() <= 50);
+        assert_eq!(store.len(), 50);
     }
 }

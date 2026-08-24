@@ -81,4 +81,13 @@ pub trait ReconcileSource {
 
     /// Session tunables.
     fn config(&self) -> &ReconcileConfig;
+
+    /// Run `f` against a view that does not change for the duration of `f`.
+    ///
+    /// Default calls `f(self)`: the source must not be mutated during `f`.
+    /// [`crate::ReconcileStore`] snapshots the tree (O(1) root clone) so
+    /// inserts on the live store cannot tear a single `step`.
+    fn with_view<R>(&self, f: impl FnOnce(&Self) -> R) -> R {
+        f(self)
+    }
 }

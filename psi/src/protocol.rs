@@ -1,10 +1,13 @@
 //! Core protocol implementation using the type-state pattern.
 
-use crate::crypto::{blind_points, decompress_point, hash_inputs_to_points};
+use crate::crypto::{blind_points, decompress_point};
 use crate::error::{PsiError, Result};
+use crate::hashed::HashedItems;
 use crate::messages::{BlindedPointsMessage, DoubleBlindedPointsMessage, PsiResult};
 use crate::state::{DoubleBlindedState, PreparedState, PsiState};
 use curve25519_dalek::ristretto::CompressedRistretto;
+use rand::rngs::OsRng;
+use rand::seq::SliceRandom;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -45,6 +48,11 @@ impl PsiProtocol<PreparedState> {
     /// Duplicate items collapse (set semantics). An empty input is valid and
     /// produces an empty message; the intersection with any peer is empty.
     ///
+    /// Equivalent to [`HashedItems::new`] followed by [`Self::from_hashed`].
+    /// Prefer caching a [`HashedItems`] when the same set is used for many
+    /// sessions: hash-to-curve is the expensive, reusable step. Each session
+    /// still gets a fresh blinding scalar and a shuffled first-round order.
+    ///
     /// # Errors
     ///
     /// Returns [`PsiError::SetTooLarge`] if the number of distinct items exceeds
@@ -60,12 +68,21 @@ impl PsiProtocol<PreparedState> {
     /// # Ok::<(), psi::PsiError>(())
     /// ```
     pub fn new(items: &[Vec<u8>]) -> Result<Self> {
-        let hash_to_point = hash_inputs_to_points(items);
-        check_set_size(hash_to_point.len())?;
+        Self::from_hashed(&HashedItems::new(items)?)
+    }
+
+    /// Start a session from a cached hash-to-curve set.
+    ///
+    /// Generates a fresh blinding scalar and shuffles the first-round point
+    /// order so two sessions on the same cache cannot be correlated by
+    /// position or by reused `k·H(x)`.
+    pub fn from_hashed(items: &HashedItems) -> Result<Self> {
+        check_set_size(items.len())?;
 
         let secret = crate::crypto::random_scalar();
-        let hash_to_blinded = blind_points(&hash_to_point, &secret);
-        let hash_order: Vec<[u8; 32]> = hash_to_blinded.keys().copied().collect();
+        let hash_to_blinded = blind_points(items.points(), &secret);
+        let mut hash_order: Vec<[u8; 32]> = hash_to_blinded.keys().copied().collect();
+        hash_order.shuffle(&mut OsRng);
 
         Ok(Self {
             state: PreparedState::new(secret, hash_to_blinded, hash_order),
@@ -434,5 +451,52 @@ mod tests {
         assert!(rendered.contains("PreparedState"));
         // Redacted Debug has item count, not a 64-hex-looking scalar dump.
         assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn from_hashed_matches_new_intersection() {
+        let items_a = [b"apple".to_vec(), b"banana".to_vec(), b"cherry".to_vec()];
+        let items_b = [b"banana".to_vec(), b"date".to_vec()];
+        let hashed_a = HashedItems::new(&items_a).unwrap();
+        let hashed_b = HashedItems::new(&items_b).unwrap();
+
+        let alice = PsiProtocol::from_hashed(&hashed_a).unwrap();
+        let bob = PsiProtocol::from_hashed(&hashed_b).unwrap();
+        let alice_msg = alice.message();
+        let bob_msg = bob.message();
+        let (alice_mid, alice_double) = alice.compute(bob_msg).unwrap();
+        let (bob_mid, bob_double) = bob.compute(alice_msg).unwrap();
+        let via_hashed = alice_mid.finalize(bob_double).unwrap();
+        let via_hashed_b = bob_mid.finalize(alice_double).unwrap();
+
+        let alice_new = PsiProtocol::new(&items_a).unwrap();
+        let bob_new = PsiProtocol::new(&items_b).unwrap();
+        let alice_msg = alice_new.message();
+        let bob_msg = bob_new.message();
+        let (alice_mid, alice_double) = alice_new.compute(bob_msg).unwrap();
+        let (bob_mid, bob_double) = bob_new.compute(alice_msg).unwrap();
+        let via_new = alice_mid.finalize(bob_double).unwrap();
+        let via_new_b = bob_mid.finalize(alice_double).unwrap();
+
+        assert_eq!(via_hashed.len(), 1);
+        assert_eq!(
+            via_hashed.intersection_hashes,
+            via_hashed_b.intersection_hashes
+        );
+        assert_eq!(via_hashed.intersection_hashes, via_new.intersection_hashes);
+        assert_eq!(via_new.intersection_hashes, via_new_b.intersection_hashes);
+    }
+
+    #[test]
+    fn from_hashed_fresh_scalar_and_order() {
+        let items: Vec<Vec<u8>> = (0..16u8).map(|i| vec![i]).collect();
+        let hashed = HashedItems::new(&items).unwrap();
+        let a = PsiProtocol::from_hashed(&hashed).unwrap().message();
+        let b = PsiProtocol::from_hashed(&hashed).unwrap().message();
+        assert_eq!(a.len(), b.len());
+        assert_ne!(
+            a.blinded_points, b.blinded_points,
+            "fresh scalar (and shuffle) must change the first-round message"
+        );
     }
 }

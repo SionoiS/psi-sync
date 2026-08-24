@@ -11,11 +11,11 @@ use sync::{RangeBounds, Reconcile, ReconcileError, ReconcileStep, ReconcileStore
 
 /// Outcome of [`TopicSync::step`].
 #[derive(Debug)]
-pub enum SyncStep<'a> {
+pub enum SyncStep {
     /// Send `message` and continue with `next`.
     Next {
         /// Session after processing `incoming`.
-        next: TopicSync<'a>,
+        next: TopicSync,
         /// Outbound frame.
         message: SyncMessage,
     },
@@ -36,29 +36,33 @@ pub enum SyncStep<'a> {
 /// The public type is not generic over PSI vs reconciling: the outer protocol
 /// has a variable number of rounds, so a wrong-phase message is
 /// [`TopicSyncError::UnexpectedMessage`] rather than a compile error.
-pub struct TopicSync<'a> {
-    stores: &'a TopicStores,
+///
+/// Holds a live alias of [`TopicStores`]. Message inserts during the session
+/// are visible to later inner reconcile steps; topics added after PSI started
+/// are not in this intersection.
+pub struct TopicSync {
+    stores: TopicStores,
     bounds: RangeBounds,
-    phase: Phase<'a>,
+    phase: Phase,
 }
 
-impl std::fmt::Debug for TopicSync<'_> {
+impl std::fmt::Debug for TopicSync {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TopicSync").finish_non_exhaustive()
     }
 }
 
-impl<'a> TopicSync<'a> {
+impl TopicSync {
     /// Start as initiator: send blinded topic points.
     ///
     /// `bounds` is the time window used for every shared topic.
-    pub fn initiate(stores: &'a TopicStores, bounds: RangeBounds) -> Result<(Self, SyncMessage)> {
+    pub fn initiate(stores: &TopicStores, bounds: RangeBounds) -> Result<(Self, SyncMessage)> {
         check_bounds(bounds)?;
-        let psi = PsiProtocol::new(&stores.psi_items())?;
+        let psi = PsiProtocol::from_hashed(&stores.hashed())?;
         let message = SyncMessage::PsiBlinded(psi.message());
         Ok((
             Self {
-                stores,
+                stores: stores.clone(),
                 bounds,
                 phase: Phase::InitiatorPsi(psi),
             },
@@ -68,18 +72,18 @@ impl<'a> TopicSync<'a> {
 
     /// Start as responder. The first [`step`](Self::step) consumes the
     /// initiator's [`SyncMessage::PsiBlinded`].
-    pub fn respond(stores: &'a TopicStores, bounds: RangeBounds) -> Result<Self> {
+    pub fn respond(stores: &TopicStores, bounds: RangeBounds) -> Result<Self> {
         check_bounds(bounds)?;
-        let psi = PsiProtocol::new(&stores.psi_items())?;
+        let psi = PsiProtocol::from_hashed(&stores.hashed())?;
         Ok(Self {
-            stores,
+            stores: stores.clone(),
             bounds,
             phase: Phase::ResponderPsi(psi),
         })
     }
 
     /// Process one incoming message. Consumes `self`.
-    pub fn step(self, incoming: SyncMessage) -> Result<SyncStep<'a>> {
+    pub fn step(self, incoming: SyncMessage) -> Result<SyncStep> {
         let TopicSync {
             stores,
             bounds,
@@ -135,7 +139,7 @@ fn require_local(stores: &TopicStores, hashes: &[[u8; 32]]) -> Result<()> {
     Ok(())
 }
 
-fn store_for<'a>(stores: &'a TopicStores, hash: &[u8; 32]) -> Result<&'a ReconcileStore> {
+fn store_for(stores: &TopicStores, hash: &[u8; 32]) -> Result<ReconcileStore> {
     stores
         .get_by_hash(hash)
         .ok_or(TopicSyncError::UnknownTopic(*hash))
@@ -158,7 +162,7 @@ fn expect_opening(hashes: &[[u8; 32]], opening: &[ReconcileFrame]) -> Result<()>
     Ok(())
 }
 
-fn session<'a>(stores: &'a TopicStores, bounds: RangeBounds, phase: Phase<'a>) -> TopicSync<'a> {
+fn session(stores: TopicStores, bounds: RangeBounds, phase: Phase) -> TopicSync {
     TopicSync {
         stores,
         bounds,
@@ -166,17 +170,17 @@ fn session<'a>(stores: &'a TopicStores, bounds: RangeBounds, phase: Phase<'a>) -
     }
 }
 
-fn initiator_on_offer<'a>(
-    stores: &'a TopicStores,
+fn initiator_on_offer(
+    stores: TopicStores,
     bounds: RangeBounds,
     psi: PsiProtocol<psi::PreparedState>,
     blinded: psi::BlindedPointsMessage,
     double_blinded: psi::DoubleBlindedPointsMessage,
-) -> Result<SyncStep<'a>> {
+) -> Result<SyncStep> {
     let (mid, my_double) = psi.compute(blinded)?;
     let psi_result = mid.finalize(double_blinded)?;
     let hashes = sorted_hashes(psi_result.intersection_hashes);
-    require_local(stores, &hashes)?;
+    require_local(&stores, &hashes)?;
 
     if hashes.is_empty() {
         return Ok(SyncStep::Done {
@@ -191,7 +195,7 @@ fn initiator_on_offer<'a>(
     let mut inner = HashMap::with_capacity(hashes.len());
     let mut opening = Vec::with_capacity(hashes.len());
     for hash in &hashes {
-        let (sess, body) = Reconcile::initiate(store_for(stores, hash)?, bounds)?;
+        let (sess, body) = Reconcile::initiate(&store_for(&stores, hash)?, bounds)?;
         inner.insert(*hash, sess);
         opening.push(ReconcileFrame::new(*hash, body));
     }
@@ -209,12 +213,12 @@ fn initiator_on_offer<'a>(
     })
 }
 
-fn responder_on_blinded<'a>(
-    stores: &'a TopicStores,
+fn responder_on_blinded(
+    stores: TopicStores,
     bounds: RangeBounds,
     psi: PsiProtocol<psi::PreparedState>,
     blinded: psi::BlindedPointsMessage,
-) -> Result<SyncStep<'a>> {
+) -> Result<SyncStep> {
     let my_blinded = psi.message();
     let (mid, my_double) = psi.compute(blinded)?;
     Ok(SyncStep::Next {
@@ -226,16 +230,16 @@ fn responder_on_blinded<'a>(
     })
 }
 
-fn responder_on_psi_done<'a>(
-    stores: &'a TopicStores,
+fn responder_on_psi_done(
+    stores: TopicStores,
     bounds: RangeBounds,
     psi: PsiProtocol<psi::DoubleBlindedState>,
     double_blinded: psi::DoubleBlindedPointsMessage,
     opening: Vec<ReconcileFrame>,
-) -> Result<SyncStep<'a>> {
+) -> Result<SyncStep> {
     let psi_result = psi.finalize(double_blinded)?;
     let hashes = sorted_hashes(psi_result.intersection_hashes);
-    require_local(stores, &hashes)?;
+    require_local(&stores, &hashes)?;
     expect_opening(&hashes, &opening)?;
 
     if hashes.is_empty() {
@@ -247,7 +251,7 @@ fn responder_on_psi_done<'a>(
 
     let mut inner = HashMap::with_capacity(hashes.len());
     for hash in &hashes {
-        inner.insert(*hash, Reconcile::respond(store_for(stores, hash)?));
+        inner.insert(*hash, Reconcile::respond(&store_for(&stores, hash)?));
     }
     let rec = Reconciling {
         hashes,
@@ -257,12 +261,12 @@ fn responder_on_psi_done<'a>(
     on_reconcile(stores, bounds, rec, opening)
 }
 
-fn on_reconcile<'a>(
-    stores: &'a TopicStores,
+fn on_reconcile(
+    stores: TopicStores,
     bounds: RangeBounds,
-    mut rec: Reconciling<'a>,
+    mut rec: Reconciling,
     frames: Vec<ReconcileFrame>,
-) -> Result<SyncStep<'a>> {
+) -> Result<SyncStep> {
     if frames.is_empty() || frames.len() != rec.inner.len() {
         return Err(TopicSyncError::UnexpectedMessage);
     }
@@ -303,12 +307,12 @@ fn on_reconcile<'a>(
     emit(stores, bounds, rec, outbound)
 }
 
-fn emit<'a>(
-    stores: &'a TopicStores,
+fn emit(
+    stores: TopicStores,
     bounds: RangeBounds,
-    mut rec: Reconciling<'a>,
+    mut rec: Reconciling,
     outbound: Vec<ReconcileFrame>,
-) -> Result<SyncStep<'a>> {
+) -> Result<SyncStep> {
     if rec.inner.is_empty() {
         rec.diffs.sort_by_key(|d| d.topic_hash);
         if rec.diffs.len() != rec.hashes.len() {
@@ -359,9 +363,9 @@ pub(crate) fn run_pair_traced(
 }
 
 #[cfg(test)]
-fn drive<'a>(
-    alice: TopicSync<'a>,
-    bob: TopicSync<'a>,
+pub(crate) fn drive(
+    alice: TopicSync,
+    bob: TopicSync,
     first: SyncMessage,
 ) -> Result<(SyncResult, SyncResult)> {
     let mut wire = Vec::new();
@@ -369,9 +373,9 @@ fn drive<'a>(
 }
 
 #[cfg(test)]
-fn drive_traced<'a>(
-    mut alice: TopicSync<'a>,
-    mut bob: TopicSync<'a>,
+pub(crate) fn drive_traced(
+    mut alice: TopicSync,
+    mut bob: TopicSync,
     mut incoming: SyncMessage,
     wire: &mut Vec<SyncMessage>,
 ) -> Result<(SyncResult, SyncResult)> {
@@ -402,7 +406,7 @@ fn drive_traced<'a>(
 
 #[cfg(test)]
 fn finish_peer(
-    session: TopicSync<'_>,
+    session: TopicSync,
     farewell: Option<SyncMessage>,
     wire: &mut Vec<SyncMessage>,
 ) -> Result<SyncResult> {
