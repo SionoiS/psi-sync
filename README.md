@@ -5,11 +5,11 @@ Rust workspace with two complementary two-party set protocols and a crate that c
 | Crate | Role |
 | --- | --- |
 | `psi` | ECDH **private set intersection** on Ristretto |
-| `reconciliation` | **Range-based set reconciliation** ([LIP-182 WAKU-SYNC](https://lip.logos.co/messaging/core/raw/sync.html)) |
-| `topic-sync` | PSI on **topics**, then reconciliation on the **shared** topics' messages |
+| `sync` | **Range-based set reconciliation** |
+| `psi-sync` | PSI on **topics**, then reconciliation on the **shared** topics' messages |
 | `examples` | In-process demos (`in_memory`, `reconcile`, `topic_sync`) |
 
-They solve different problems. PSI hides exclusive items and returns only the intersection. Reconciliation finds the symmetric difference so two stores can converge; differing ranges **reveal identifiers**. `topic-sync` runs PSI first so exclusive subscriptions never enter a reconcile ItemSet.
+They solve different problems. PSI hides exclusive items and returns only the intersection. Reconciliation finds the symmetric difference so two stores can converge; differing ranges **reveal identifiers**. `psi-sync` runs PSI first so exclusive subscriptions never enter a reconcile ItemSet.
 
 ---
 
@@ -63,13 +63,13 @@ Honest-but-curious peers. The channel **must** be authenticated, confidential, a
 
 ---
 
-## `reconciliation` (LIP-182 algorithm)
+## `sync`
 
-Range-based set reconciliation over any totally ordered item type (`ReconcileItem`). The session is type-state (`Reconcile<Running>`), same idea as `PsiProtocol<S>`: `step` consumes `self`. Type parameters default to `SyncId { timestamp, hash }`, the LIP-182 identifier (ordered by time then hash, XOR-of-hashes fingerprint, time/hash-space splits). Other types need only `Ord` plus a fingerprint; they split ranges using local item values as cut points.
+Range-based set reconciliation over any totally ordered item type (`ReconcileItem`). The session is type-state (`Reconcile<Running>`), same idea as `PsiProtocol<S>`: `step` consumes `self`. Type parameters default to `SyncId { timestamp, hash }` (ordered by time then hash, XOR-of-hashes fingerprint, time/hash-space splits). Other types need only `Ord` plus a fingerprint; they split ranges using local item values as cut points.
 
-The local set is a **monoid tree** (Meyer, Algorithm 1): each AVL node stores the XOR fingerprint and size of its subtree, so a range fingerprint is a path walk rather than a scan. `TaggedStore` nests that tree into a 2-D range tree (tag × item). Query a single topic with `RectBounds::topic` — never a hash **interval** of topics, which would include exclusive subscriptions whose hashes fall between two shared ones. `topic-sync` still keeps per-topic stores and PSI for that reason.
+The local set is a **monoid tree** (Meyer, Algorithm 1): each AVL node stores the XOR fingerprint and size of its subtree, so a range fingerprint is a path walk rather than a scan. `TaggedStore` nests that tree into a 2-D range tree (tag × item). Query a single topic with `RectBounds::topic` — never a hash **interval** of topics, which would include exclusive subscriptions whose hashes fall between two shared ones. `psi-sync` still keeps per-topic stores and PSI for that reason.
 
-This crate implements **reconciliation only**, not a transfer protocol and not Waku message hashing (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself. `codec`, `RangeBounds::window`, and `prune_before` are `SyncId`-specific. The store is frozen for the life of a `Reconcile` session: do not insert or remove while it is running.
+This crate implements **reconciliation only**, not a transfer protocol and not a particular message-hashing scheme (you supply the 32-byte hash). There is no cluster/shard scope — filter the store yourself. `codec`, `RangeBounds::window`, and `prune_before` are `SyncId`-specific. The store is frozen for the life of a `Reconcile` session: do not insert or remove while it is running.
 
 ### Flow
 
@@ -78,12 +78,12 @@ This crate implements **reconciliation only**, not a transfer protocol and not W
 3. Item sets are merge-walked. The first set lists local items (`reconciled = false`); the reply has exclusive `elements` + `needed` and `reconciled = true`.
 4. The side that produces an empty message returns `ReconcileStep::Done { farewell: Some(empty) }`. The peer `step`s that closer and finishes.
 
-`codec` is optional and not used by the session. It encodes the session item-set shape (`elements` then `needed`) and is **not** Nwaku's ItemSet layout. Cluster/shard bytes are written as zero and ignored on decode.
+`codec` is optional and not used by the session. It encodes the session item-set shape (`elements` then `needed`). Cluster/shard bytes are written as zero and ignored on decode.
 
 ### Usage
 
 ```rust
-use reconciliation::{RangeBounds, Reconcile, ReconcileStep, ReconcileStore, SyncId};
+use sync::{RangeBounds, Reconcile, ReconcileStep, ReconcileStore, SyncId};
 
 let mut alice = ReconcileStore::new(Default::default())?;
 let mut bob = ReconcileStore::new(Default::default())?;
@@ -99,19 +99,19 @@ match b.step(first)? {
         let _ = a.step(message)?;
     }
 }
-# Ok::<(), reconciliation::ReconcileError>(())
+# Ok::<(), sync::ReconcileError>(())
 ```
 
-Items that also have a tag (topic) live in `TaggedStore`. Reconcile a single topic with `RectBounds::topic`; a tag **interval** over hashed topics would include exclusive subscriptions and is not how `topic-sync` queries the store.
+Items that also have a tag (topic) live in `TaggedStore`. Reconcile a single topic with `RectBounds::topic`; a tag **interval** over hashed topics would include exclusive subscriptions and is not how `psi-sync` queries the store.
 
 ```rust
-use reconciliation::{RangeBounds, RectBounds, TaggedStore, SyncId};
+use sync::{RangeBounds, RectBounds, TaggedStore, SyncId};
 
 let mut store = TaggedStore::new(Default::default())?;
 store.insert([0x11; 32], SyncId::new(1, [1u8; 32]))?;
 let bounds = RectBounds::topic([0x11; 32], RangeBounds::window(0, 10)?)?;
 assert_eq!(store.count(bounds), 1);
-# Ok::<(), reconciliation::ReconcileError>(())
+# Ok::<(), sync::ReconcileError>(())
 ```
 
 ### Reconciliation threat model
@@ -120,12 +120,12 @@ Peers are trusted to follow the protocol. Fingerprints leak a digest of items in
 
 ---
 
-## `topic-sync`
+## `psi-sync`
 
 Two parties each hold a map of **topics** (opaque byte strings) to per-topic `ReconcileStore`s. After one session they both know:
 
 1. Which topics they share (PSI). Exclusive topics stay hidden.
-2. For each shared topic, which `SyncId`s to send and receive (LIP-182).
+2. For each shared topic, which `SyncId`s to send and receive.
 
 Payload transfer is still the caller's job. The time window is the same for every shared topic. Shared topics reconcile in parallel; `PsiDone.opening` and later `Reconcile` batches list frames in lexicographic PSI-hash order. Transport- and codec-agnostic. Stores are frozen for the life of a `TopicSync` session: do not insert or remove while it is running.
 
@@ -134,7 +134,7 @@ Payload transfer is still the caller's job. The time window is the same for ever
 1. `TopicSync::initiate(&stores, bounds)` sends blinded topic points.
 2. The responder `step`s that into a `PsiOffer` (own blinded points + double-blind of the initiator).
 3. The initiator `step`s the offer, finalizes PSI, and sends `PsiDone` — the double-blind plus one opening fingerprint per shared topic (`opening` is empty on empty intersection).
-4. Each still-active shared topic runs an inner `Reconcile` in the same outer round. A finished topic is omitted from later batches. The inner LIP-182 empty closer is forwarded once as a frame so the peer can `step` it.
+4. Each still-active shared topic runs an inner `Reconcile` in the same outer round. A finished topic is omitted from later batches. The inner empty closer is forwarded once as a frame so the peer can `step` it.
 5. `SyncResult.topics` lists per-topic `to_send` / `to_recv`. Stores are not mutated.
 
 Empty topic intersection is a successful no-op: no reconcile frames, no message IDs exchanged.
@@ -142,7 +142,7 @@ Empty topic intersection is a successful no-op: no reconcile frames, no message 
 ### Usage
 
 ```rust
-use topic_sync::{RangeBounds, ReconcileStore, SyncId, TopicStores, TopicSync};
+use psi_sync::{RangeBounds, ReconcileStore, SyncId, TopicStores, TopicSync};
 
 let mut alice = TopicStores::new();
 let mut bob = TopicStores::new();
@@ -154,7 +154,7 @@ let bounds = RangeBounds::window(0, 10)?;
 let (alice_sess, first) = TopicSync::initiate(&alice, bounds)?;
 let bob_sess = TopicSync::respond(&bob, bounds)?;
 let _ = (alice_sess, first, bob_sess);
-# Ok::<(), topic_sync::TopicSyncError>(())
+# Ok::<(), psi_sync::TopicSyncError>(())
 ```
 
 ### Topic-sync threat model
@@ -168,8 +168,8 @@ Union of the two sub-protocols. Honest-but-curious peers; authenticated, confide
 ```bash
 cargo test --workspace
 cargo test --doc -p psi
-cargo test --doc -p reconciliation
-cargo test --doc -p topic-sync
+cargo test --doc -p sync
+cargo test --doc -p psi-sync
 cargo clippy --workspace --all-targets -- --deny warnings
 cargo fmt --all -- --check
 cargo run -p examples --bin in_memory

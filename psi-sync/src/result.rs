@@ -1,6 +1,6 @@
 //! Session result: per-topic message-ID diffs.
 
-use reconciliation::SyncId;
+use sync::SyncId;
 
 /// Symmetric difference accumulated for one shared topic.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -17,7 +17,7 @@ pub struct TopicDiff {
 ///
 /// One entry per shared topic, in lexicographic PSI-hash order. The crate
 /// does not insert `to_recv` into the local stores — same boundary as
-/// `reconciliation`.
+/// `sync`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SyncResult {
     /// Per-topic diffs. Empty if the topic intersection was empty.

@@ -2,8 +2,8 @@
 
 use crate::error::{Result, TopicSyncError};
 use psi::{hash_bytes, MAX_ITEMS};
-use reconciliation::ReconcileStore;
 use std::collections::HashMap;
+use sync::ReconcileStore;
 
 struct TopicEntry {
     topic: Vec<u8>,
@@ -97,7 +97,7 @@ impl std::fmt::Debug for TopicStores {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reconciliation::{ReconcileConfig, ReconcileStore, SyncId};
+    use sync::{ReconcileConfig, ReconcileStore, SyncId};
 
     fn empty_store() -> ReconcileStore {
         ReconcileStore::new(ReconcileConfig::default()).unwrap()

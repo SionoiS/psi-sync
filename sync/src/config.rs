@@ -1,8 +1,8 @@
-//! Implementation parameters (not LIP MUST values).
+//! Implementation parameters.
 
 use crate::error::{ReconcileError, Result};
 
-/// Defaults used by Nwaku / the LIP implementation notes.
+/// Default tunables.
 pub const DEFAULT_THRESHOLD: usize = 100;
 pub const DEFAULT_PARTITIONS: usize = 8;
 pub const DEFAULT_MAX_ITEMS: usize = 1_048_576;

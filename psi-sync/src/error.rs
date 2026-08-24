@@ -1,7 +1,7 @@
 //! Errors for the composed topic-sync session.
 
 use psi::PsiError;
-use reconciliation::ReconcileError;
+use sync::ReconcileError;
 
 /// Errors that can occur during a [`crate::TopicSync`] session.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

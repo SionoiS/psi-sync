@@ -7,7 +7,7 @@
 
 use rand::rngs::OsRng;
 use rand::RngCore;
-use reconciliation::{
+use sync::{
     codec, RangeBounds, Reconcile, ReconcileMessage, ReconcileResult, ReconcileStep,
     ReconcileStore, SyncId,
 };
@@ -62,10 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run<'a>(
-    mut alice: Reconcile<'a, reconciliation::Running>,
-    mut bob: Reconcile<'a, reconciliation::Running>,
+    mut alice: Reconcile<'a, sync::Running>,
+    mut bob: Reconcile<'a, sync::Running>,
     mut incoming: ReconcileMessage,
-) -> Result<(ReconcileResult, ReconcileResult), reconciliation::ReconcileError> {
+) -> Result<(ReconcileResult, ReconcileResult), sync::ReconcileError> {
     let mut rounds = 0u32;
     loop {
         rounds += 1;
@@ -100,9 +100,9 @@ fn run<'a>(
 }
 
 fn close(
-    session: Reconcile<'_, reconciliation::Running>,
+    session: Reconcile<'_, sync::Running>,
     farewell: Option<ReconcileMessage>,
-) -> Result<ReconcileResult, reconciliation::ReconcileError> {
+) -> Result<ReconcileResult, sync::ReconcileError> {
     let msg = farewell.unwrap_or_else(ReconcileMessage::empty);
     match session.step(msg)? {
         ReconcileStep::Done { result, .. } => Ok(result),

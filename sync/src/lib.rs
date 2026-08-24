@@ -1,16 +1,14 @@
-//! Range-based set reconciliation ([LIP-182][lip] algorithm, Rust API).
+//! Range-based set reconciliation (Rust API).
 //!
 //! Two peers holding ordered sets of [`ReconcileItem`]s exchange
 //! [`ReconcileMessage`]s until they agree on the symmetric difference.
 //! The set requirement is a total order; fingerprints test range equality
-//! without listing items. [`SyncId`] is the LIP-182 item type (time then
-//! hash) and the default type parameter. [`ReconcileStore`] holds items in a
-//! monoid tree; [`TaggedStore`] adds a tag axis (topic × item).
+//! without listing items. [`SyncId`] is the default item type (time then
+//! hash). [`ReconcileStore`] holds items in a monoid tree; [`TaggedStore`]
+//! adds a tag axis (topic × item).
 //!
 //! This is **not** private set intersection — see the `psi` crate. There
 //! is no transfer protocol.
-//!
-//! [lip]: https://lip.logos.co/messaging/core/raw/sync.html
 //!
 //! The session is type-state: only [`Reconcile<Running>`] can [`Reconcile::step`].
 //! `step` consumes `self`, like `psi::PsiProtocol::compute`. The store is
@@ -19,7 +17,7 @@
 //! ## Example
 //!
 //! ```
-//! use reconciliation::{
+//! use sync::{
 //!     RangeBounds, Reconcile, ReconcileStep, ReconcileStore, SyncId,
 //! };
 //!
@@ -49,7 +47,7 @@
 //!                             ReconcileStep::Done { result, .. } => result,
 //!                             ReconcileStep::Next { .. } => unreachable!(),
 //!                         },
-//!                         None => match bob.step(reconciliation::ReconcileMessage::empty())? {
+//!                         None => match bob.step(sync::ReconcileMessage::empty())? {
 //!                             ReconcileStep::Done { result, .. } => result,
 //!                             ReconcileStep::Next { .. } => unreachable!(),
 //!                         },
@@ -64,7 +62,7 @@
 //!                     ReconcileStep::Done { result, .. } => result,
 //!                     ReconcileStep::Next { .. } => unreachable!(),
 //!                 },
-//!                 None => match alice.step(reconciliation::ReconcileMessage::empty())? {
+//!                 None => match alice.step(sync::ReconcileMessage::empty())? {
 //!                     ReconcileStep::Done { result, .. } => result,
 //!                     ReconcileStep::Next { .. } => unreachable!(),
 //!                 },
@@ -76,13 +74,13 @@
 //!
 //! assert_eq!(ar.to_send.len(), 1);
 //! assert_eq!(br.to_recv, ar.to_send);
-//! # Ok::<(), reconciliation::ReconcileError>(())
+//! # Ok::<(), sync::ReconcileError>(())
 //! ```
 //!
 //! Any [`ReconcileItem`] works. This newtype uses a `u64` fingerprint:
 //!
 //! ```
-//! use reconciliation::{
+//! use sync::{
 //!     RangeBounds, Reconcile, ReconcileItem, ReconcileStep, ReconcileStore,
 //! };
 //!
@@ -113,7 +111,7 @@
 //!         let _ = (alice_sess.step(message)?, next);
 //!     }
 //! }
-//! # Ok::<(), reconciliation::ReconcileError>(())
+//! # Ok::<(), sync::ReconcileError>(())
 //! ```
 //!
 //! ## Threat model
@@ -129,7 +127,7 @@
 //! [`codec::encode`] / [`codec::decode`] are optional. The session never
 //! calls them. Cluster/shard headers are written as zero and ignored.
 //! Session replies use exclusive `elements` plus `needed`; the codec encodes
-//! that shape and is not Nwaku's ItemSet layout.
+//! that shape (`elements` then `needed`).
 
 pub use bounds::RangeBounds;
 pub use config::ReconcileConfig;

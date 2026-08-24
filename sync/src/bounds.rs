@@ -1,4 +1,4 @@
-//! Inclusive–exclusive range bounds (LIP-182 `RangeBounds`).
+//! Inclusive–exclusive range bounds.
 
 use crate::error::{ReconcileError, Result};
 use crate::id::SyncId;

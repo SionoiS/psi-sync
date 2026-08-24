@@ -5,7 +5,7 @@
 //! cargo run -p examples --bin topic_sync
 //! ```
 
-use topic_sync::{
+use psi_sync::{
     RangeBounds, ReconcileStore, SyncId, SyncMessage, SyncResult, SyncStep, TopicStores, TopicSync,
 };
 
@@ -77,7 +77,7 @@ fn fill(
     map: &mut TopicStores,
     topic: &[u8],
     ids: &[(u64, u8)],
-) -> Result<(), topic_sync::TopicSyncError> {
+) -> Result<(), psi_sync::TopicSyncError> {
     let mut store = ReconcileStore::new(Default::default())?;
     for &(t, h0) in ids {
         let mut hash = [0u8; 32];
@@ -91,7 +91,7 @@ fn run<'a>(
     mut alice: TopicSync<'a>,
     mut bob: TopicSync<'a>,
     mut incoming: SyncMessage,
-) -> Result<(SyncResult, SyncResult), topic_sync::TopicSyncError> {
+) -> Result<(SyncResult, SyncResult), psi_sync::TopicSyncError> {
     loop {
         match bob.step(incoming)? {
             SyncStep::Next { next, message } => {
@@ -116,11 +116,11 @@ fn run<'a>(
 fn close(
     session: TopicSync<'_>,
     farewell: Option<SyncMessage>,
-) -> Result<SyncResult, topic_sync::TopicSyncError> {
-    let msg = farewell.ok_or(topic_sync::TopicSyncError::UnexpectedMessage)?;
+) -> Result<SyncResult, psi_sync::TopicSyncError> {
+    let msg = farewell.ok_or(psi_sync::TopicSyncError::UnexpectedMessage)?;
     match session.step(msg)? {
         SyncStep::Done { result, .. } => Ok(result),
-        SyncStep::Next { .. } => Err(topic_sync::TopicSyncError::UnexpectedMessage),
+        SyncStep::Next { .. } => Err(psi_sync::TopicSyncError::UnexpectedMessage),
     }
 }
 

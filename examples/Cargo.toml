@@ -20,6 +20,6 @@ path = "src/bin/topic_sync.rs"
 
 [dependencies]
 psi = { path = "../psi" }
-reconciliation = { path = "../reconciliation" }
-topic-sync = { path = "../topic-sync" }
+sync = { path = "../sync" }
+psi-sync = { path = "../psi-sync" }
 rand.workspace = true

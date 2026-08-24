@@ -1,4 +1,4 @@
-//! XOR fingerprint of item hashes (LIP-182).
+//! XOR fingerprint of item hashes.
 
 /// XOR `hash` into `acc`.
 pub fn xor_into(acc: &mut [u8; 32], hash: &[u8; 32]) {

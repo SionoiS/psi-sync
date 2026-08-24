@@ -6,8 +6,8 @@ use crate::result::SyncResult;
 use crate::state::{Phase, Reconciling};
 use crate::stores::TopicStores;
 use psi::PsiProtocol;
-use reconciliation::{RangeBounds, Reconcile, ReconcileError, ReconcileStep, ReconcileStore};
 use std::collections::HashMap;
+use sync::{RangeBounds, Reconcile, ReconcileError, ReconcileStep, ReconcileStore};
 
 /// Outcome of [`TopicSync::step`].
 #[derive(Debug)]
@@ -31,7 +31,7 @@ pub enum SyncStep<'a> {
 /// One side of a topic-sync exchange.
 ///
 /// Construct with [`TopicSync::initiate`] or [`TopicSync::respond`]. `step`
-/// consumes `self`, like [`Reconcile::step`](reconciliation::Reconcile::step).
+/// consumes `self`, like [`Reconcile::step`](sync::Reconcile::step).
 ///
 /// The public type is not generic over PSI vs reconciling: the outer protocol
 /// has a variable number of rounds, so a wrong-phase message is

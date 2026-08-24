@@ -1,10 +1,9 @@
-//! Optional LIP-182-inspired bytes for a [`ReconcileMessage`].
+//! Optional byte encoding for a [`ReconcileMessage`].
 //!
 //! The session API never uses this module. Cluster/shard fields are written as
 //! zeros and ignored on decode. An empty message encodes as a single `0` byte.
 //!
 //! Item sets encode `needed` after `elements` (uleb length + ids, same style).
-//! This is **not** Nwaku's ItemSet layout.
 
 use crate::bounds::RangeBounds;
 use crate::id::{SyncId, EMPTY_HASH};
@@ -327,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_delta_matches_lip_table() {
+    fn hash_delta_common_prefix() {
         let mut prev = [0u8; 32];
         prev[0] = 0x35;
         prev[1] = 0x1c;

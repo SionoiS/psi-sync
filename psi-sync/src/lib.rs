@@ -1,6 +1,6 @@
-//! # Topic-sync
+//! # psi-sync
 //!
-//! Compose [`psi`] and [`reconciliation`] into one two-party session:
+//! Compose [`psi`] and [`sync`] into one two-party session:
 //!
 //! 1. **PSI** on each party's topic set. Both learn only the topics they share.
 //! 2. **Range-based reconciliation** in parallel per shared topic. Both learn
@@ -24,7 +24,7 @@
 //!    order). Empty `opening` is empty intersection.
 //! 4. Shared topics reconcile in parallel. Each [`SyncMessage::Reconcile`]
 //!    carries a [`ReconcileFrame`] per still-active topic. A finished topic
-//!    is omitted from later batches. The inner LIP-182 empty closer is
+//!    is omitted from later batches. The inner empty closer is
 //!    forwarded once as a frame so the peer can `step` it.
 //!
 //! Empty topic intersection is a successful no-op: `opening` is empty and
@@ -33,7 +33,7 @@
 //! ## Example
 //!
 //! ```
-//! use topic_sync::{
+//! use psi_sync::{
 //!     RangeBounds, ReconcileStore, SyncId, SyncStep, TopicStores, TopicSync,
 //! };
 //!
@@ -90,7 +90,7 @@
 //! assert_eq!(alice_result.len(), 1);
 //! assert_eq!(bob_result.len(), 1);
 //! assert_eq!(alice_result.topics[0].to_send, bob_result.topics[0].to_recv);
-//! # Ok::<(), topic_sync::TopicSyncError>(())
+//! # Ok::<(), psi_sync::TopicSyncError>(())
 //! ```
 //!
 //! ## Threat model
@@ -99,17 +99,17 @@
 //! confidential, and order-preserving**. Topic-set sizes leak from PSI
 //! message lengths. Shared topic hashes appear on reconcile frames.
 //! Exclusive topic bytes never leave this crate. Message identifiers in a
-//! differing range leak (same as [`reconciliation`]). XOR fingerprints can
+//! differing range leak (same as [`sync`]). XOR fingerprints can
 //! collide and hide a difference. A malicious peer can lie about its set
 //! or stall. There are no proofs of correct computation.
 
 pub use error::{Result, TopicSyncError};
 pub use message::{ReconcileFrame, SyncMessage};
 pub use psi::{hash_bytes, BlindedPointsMessage, DoubleBlindedPointsMessage};
-pub use reconciliation::{RangeBounds, ReconcileConfig, ReconcileMessage, ReconcileStore, SyncId};
 pub use result::{SyncResult, TopicDiff};
 pub use session::{SyncStep, TopicSync};
 pub use stores::TopicStores;
+pub use sync::{RangeBounds, ReconcileConfig, ReconcileMessage, ReconcileStore, SyncId};
 
 mod error;
 mod message;
@@ -122,8 +122,8 @@ mod stores;
 mod integration_tests {
     use super::*;
     use crate::session::{run_pair, run_pair_traced};
-    use reconciliation::ReconcileConfig;
     use std::collections::HashSet;
+    use sync::ReconcileConfig;
 
     fn sid(t: u64, h0: u8) -> SyncId {
         let mut hash = [0u8; 32];
@@ -418,7 +418,7 @@ mod integration_tests {
         let err = TopicSync::initiate(&stores, bounds).unwrap_err();
         assert!(matches!(
             err,
-            TopicSyncError::Reconcile(reconciliation::ReconcileError::InvalidBounds)
+            TopicSyncError::Reconcile(sync::ReconcileError::InvalidBounds)
         ));
     }
 }

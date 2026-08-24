@@ -2,14 +2,14 @@
 
 use crate::result::TopicDiff;
 use psi::{DoubleBlindedState, PreparedState, PsiProtocol};
-use reconciliation::{Reconcile, ReconcileResult, Running};
 use std::collections::HashMap;
+use sync::{Reconcile, ReconcileResult, Running};
 
 /// In-flight per-topic reconciliation after PSI has finished.
 pub(crate) struct Reconciling<'a> {
     /// Sorted intersection hashes. Result order, and the expected complete set.
     pub hashes: Vec<[u8; 32]>,
-    /// Inner LIP-182 session per still-active topic.
+    /// Inner reconcile session per still-active topic.
     pub inner: HashMap<[u8; 32], Reconcile<'a, Running>>,
     pub diffs: Vec<TopicDiff>,
 }

@@ -79,9 +79,9 @@ name = "examples"
 version = "0.2.0"
 dependencies = [
  "psi",
+ "psi-sync",
  "rand",
- "reconciliation",
- "topic-sync",
+ "sync",
 ]
 
 [[package]]
@@ -147,6 +147,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "psi-sync"
+version = "0.2.0"
+dependencies = [
+ "psi",
+ "sync",
+ "thiserror",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -183,13 +192,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom",
-]
-
-[[package]]
-name = "reconciliation"
-version = "0.2.0"
-dependencies = [
- "thiserror",
 ]
 
 [[package]]
@@ -236,6 +238,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sync"
+version = "0.2.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -253,15 +262,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "topic-sync"
-version = "0.2.0"
-dependencies = [
- "psi",
- "reconciliation",
- "thiserror",
 ]
 
 [[package]]

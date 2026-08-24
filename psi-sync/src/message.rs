@@ -1,9 +1,9 @@
 //! Outer protocol messages. Transport- and codec-agnostic.
 
 use psi::{BlindedPointsMessage, DoubleBlindedPointsMessage};
-use reconciliation::ReconcileMessage;
+use sync::ReconcileMessage;
 
-/// One in-flight LIP-182 payload tagged by a PSI topic hash.
+/// One in-flight reconcile payload tagged by a PSI topic hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileFrame {
     /// [`psi::hash_bytes`] of the topic. Never the raw topic bytes.
@@ -48,7 +48,7 @@ pub enum SyncMessage {
         opening: Vec<ReconcileFrame>,
     },
 
-    /// In-flight LIP-182 payloads for still-active shared topics.
+    /// In-flight reconcile payloads for still-active shared topics.
     ///
     /// A topic that has finished on this side is omitted. The inner empty
     /// closer is forwarded once as a frame so the peer can `step` it.

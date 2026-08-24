@@ -1,4 +1,4 @@
-//! Range partitioning: item-index (any [`Ord`]) and LIP-182 domain splits.
+//! Range partitioning: item-index (any [`Ord`]) and time/hash-space domain splits.
 
 use crate::bounds::RangeBounds;
 use crate::id::SyncId;

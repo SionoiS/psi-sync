@@ -1,4 +1,4 @@
-//! Per-message processing (LIP-182 reconciliation heuristic).
+//! Per-message processing (range-based reconciliation heuristic).
 
 use crate::error::{ReconcileError, Result};
 use crate::item::ReconcileItem;

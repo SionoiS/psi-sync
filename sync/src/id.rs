@@ -1,4 +1,4 @@
-//! `SyncId` — LIP-182 item: timestamp then hash.
+//! `SyncId` — timestamp then hash.
 //!
 //! Implements [`crate::ReconcileItem`] with an XOR-of-hashes fingerprint
 //! and time/hash-space partitioning.
